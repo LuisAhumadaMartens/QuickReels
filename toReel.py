@@ -80,10 +80,10 @@ def draw_keypoints(frame, keypoints, x_offset=0):
         ky, kx, kp_conf = kp
         if kp_conf > DETECTION_CONFIDENCE_THRESHOLD:
             cx, cy = int(kx * x) - x_offset, int(ky * y)
-            cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+            cv2.circle(frame, (cx, cy), 8, (0, 255, 0), -1)
             conf_text = f"{int(kp_conf*100)}%"
             cv2.putText(frame, conf_text, (cx+10, cy-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
     return frame
 
 def process_video(input_source=None, output_path="output_video.mp4", debug=False):
@@ -98,10 +98,9 @@ def process_video(input_source=None, output_path="output_video.mp4", debug=False
     width, height, fps, total_frames = get_video_metadata(input_source)
     crop_width = int(height * ASPECT_RATIO)
     
-    # Setup video capture and writer
     cap = cv2.VideoCapture(input_source)
     writer = cv2.VideoWriter(output_path, 
-                           cv2.VideoWriter_fourcc(*'mp4v'), 
+                           cv2.VideoWriter_fourcc(*'avc1'),
                            fps, 
                            (crop_width, height))
     
@@ -113,6 +112,9 @@ def process_video(input_source=None, output_path="output_video.mp4", debug=False
         if not ret:
             break
             
+        if debug:
+            cv2.imwrite(f"debug_frame_{frame_count}.jpg", frame)
+            
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frame_diff = mse(prev_gray_frame, gray)
         prev_gray_frame = gray.copy()
@@ -121,8 +123,9 @@ def process_video(input_source=None, output_path="output_video.mp4", debug=False
         outputs = movenet_func(input_tensor)
         keypoints = outputs['output_0'].numpy()[0]
         
-        max_conf_idx = np.argmax(keypoints[:, 2])
-        center_x = keypoints[max_conf_idx, 1]
+        confidences = keypoints[:, 2]
+        weights = confidences / np.sum(confidences)
+        center_x = np.sum(keypoints[:, 1] * weights)
         
         x_center = int(center_x * width)
         x_start = x_center - (crop_width // 2)
