@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Run toReel.py</title>
+</head>
+<body>
+    <h1>Run Python Script from JavaScript</h1>
+    <input type="text" id="inputPath" placeholder="Input file path">
+    <input type="text" id="outputPath" placeholder="Output file path">
+    <button onclick="runScript()">Convert</button>
+    <p id="response"></p>
+
+    <script>
+        async function runScript() {
+            const inputPath = document.getElementById("inputPath").value;
+            const outputPath = document.getElementById("outputPath").value;
+
+            if (!inputPath || !outputPath) {
+                document.getElementById("response").innerText = "Please enter input and output file paths.";
+                return;
+            }
+
+            const response = await fetch("http://localhost:5000/run-script", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ input: inputPath, output: outputPath })
+            });
+
+            const result = await response.json();
+            document.getElementById("response").innerText = result.message || result.error;
+        }
+    </script>
+</body>
+</html>
