@@ -4,32 +4,134 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Run toReel.py</title>
+    <style>
+        #console {
+            background-color: black;
+            color: #00ff00;
+            font-family: monospace;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            margin: 10px 0;
+            white-space: pre-wrap;
+        }
+        
+        #cancelBtn {
+            background-color: #ff4444;
+            color: white;
+            padding: 5px 10px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        #cancelBtn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
 </head>
 <body>
-    <h1>Run Python Script from JavaScript</h1>
-    <input type="text" id="inputPath" placeholder="Input file path">
-    <input type="text" id="outputPath" placeholder="Output file path">
-    <button onclick="runScript()">Convert</button>
-    <p id="response"></p>
+    <h1>Video Converter</h1>
+    <input type="file" id="inputFile" accept=".mp4,.mov,.avi,.wmv,.flv,.mkv">
+    <button onclick="handleConvert()">Convert</button>
+    <button id="cancelBtn" onclick="handleCancel()" disabled>Cancel</button>
+    <p id="status"></p>
+    <div id="console"></div>
 
     <script>
-        async function runScript() {
-            const inputPath = document.getElementById("inputPath").value;
-            const outputPath = document.getElementById("outputPath").value;
+        let isConverting = false;
+        let currentFileName = '';
 
-            if (!inputPath || !outputPath) {
-                document.getElementById("response").innerText = "Please enter input and output file paths.";
+        function appendToConsole(text) {
+            const console = document.getElementById('console');
+            console.textContent += text + '\n';
+            console.scrollTop = console.scrollHeight;
+        }
+
+        function handleCancel() {
+            if (isConverting) {
+                appendToConsole('Cancelling conversion...');
+                document.getElementById('cancelBtn').disabled = true;
+                isConverting = false;
+            }
+        }
+
+        async function handleConvert() {
+            const fileInput = document.getElementById('inputFile');
+            const statusElement = document.getElementById('status');
+            const cancelBtn = document.getElementById('cancelBtn');
+            const console = document.getElementById('console');
+
+            if (!fileInput.files.length) {
+                statusElement.textContent = 'Please select a video file';
                 return;
             }
 
-            const response = await fetch("http://localhost:5000/run-script", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ input: inputPath, output: outputPath })
-            });
+            const file = fileInput.files[0];
+            const extension = file.name.split('.').pop().toLowerCase();
+            currentFileName = file.name;
 
-            const result = await response.json();
-            document.getElementById("response").innerText = result.message || result.error;
+            console.textContent = '';
+            isConverting = true;
+            cancelBtn.disabled = false;
+            
+            statusElement.textContent = `Converting: ${file.name}`;
+            appendToConsole(`Starting conversion of ${file.name}`);
+            appendToConsole(`Input format: ${extension}`);
+
+            try {
+                // Log file details
+                appendToConsole('File details:');
+                appendToConsole(`Name: ${file.name}`);
+                appendToConsole(`Size: ${file.size} bytes`);
+                appendToConsole(`Type: ${file.type}`);
+                appendToConsole(`Last modified: ${new Date(file.lastModified).toISOString()}`);
+
+                // Create a FormData object with the actual file
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('filename', file.name);
+                
+                // Log FormData contents (for debugging)
+                appendToConsole('FormData contents:');
+                for (let pair of formData.entries()) {
+                    appendToConsole(`${pair[0]}: ${pair[1]}`);
+                }
+
+                // Make the API call
+                appendToConsole('Sending request to server...');
+                const response = await fetch('http://localhost:5000/run-script', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                
+                // Log the complete server response
+                appendToConsole('Server response:');
+                appendToConsole(JSON.stringify(data, null, 2));
+
+                if (response.ok) {
+                    if (data.stdout) appendToConsole('Output: ' + data.stdout);
+                    if (data.stderr) appendToConsole('Errors: ' + data.stderr);
+                    appendToConsole('Conversion completed successfully!');
+                    appendToConsole(`Output saved as: ${data.output}`);
+                    statusElement.textContent = 'Conversion completed!';
+                } else {
+                    throw new Error(data.error || 'Conversion failed');
+                }
+            } catch (error) {
+                appendToConsole(`Error details:`);
+                appendToConsole(error.toString());
+                appendToConsole('Full error:');
+                appendToConsole(JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+                if (error.stack) appendToConsole(error.stack);
+                statusElement.textContent = 'Conversion failed';
+            } finally {
+                isConverting = false;
+                cancelBtn.disabled = true;
+            }
         }
     </script>
 </body>
