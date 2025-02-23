@@ -56,6 +56,16 @@ def run_script():
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
 
+        def timestamp_to_seconds(timestamp):
+            # Convert "MM:SS" format to seconds
+            if not timestamp:
+                return 0
+            parts = timestamp.split(':')
+            if len(parts) == 2:
+                minutes, seconds = map(float, parts)
+                return minutes * 60 + seconds
+            return float(timestamp)
+
         # Get the directory where toReel.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(script_dir)
@@ -64,19 +74,23 @@ def run_script():
             output_path = os.path.join(UPLOAD_DIR, f"output.{input_path.split('.')[-1]}")
             cmd = ["python", "toReel.py", "-i", input_path, "-o", output_path]
         else:
-            # Handle multiple crops
+            # Handle multiple crops with new argument format
             crops = data.get('crops', [])
-            cmd = ["python", "toReel.py", "-i", input_path]
+            cmd = ["python", "toReel.py", "-i", input_path, "-mo"]
             
-            for crop in crops:
-                output_name = f"output_{crop['start']}_{crop['end']}.{input_path.split('.')[-1]}"
+            for i, crop in enumerate(crops):
+                output_name = f"output_{i+1}.{input_path.split('.')[-1]}"
                 output_path = os.path.join(UPLOAD_DIR, output_name)
                 
-                # Convert time (in seconds) to frames
-                start_frame = int(float(crop['start']) * fps)
-                end_frame = int(float(crop['end']) * fps)
+                # Convert timestamp to seconds, then to frames
+                start_seconds = timestamp_to_seconds(crop['start'])
+                end_seconds = timestamp_to_seconds(crop['end'])
                 
-                cmd.extend(["-c", output_path, f"{start_frame}-{end_frame}"])
+                start_frame = int(start_seconds * fps)
+                end_frame = int(end_seconds * fps)
+                
+                # Add output path and frame range for each crop
+                cmd.extend([output_path, f"{start_frame}-{end_frame}"])
 
         logger.info(f"Running command: {' '.join(cmd)}")
         result = subprocess.run(cmd)
@@ -92,7 +106,7 @@ def run_script():
             })
         else:
             # For multiple crops, return all output paths
-            output_files = [c[1] for c in zip(crops, [os.path.join(UPLOAD_DIR, f"output_{c['start']}_{c['end']}.{input_path.split('.')[-1]}") for c in crops])]
+            output_files = [c[1] for c in zip(crops, [os.path.join(UPLOAD_DIR, f"output_{i+1}.{input_path.split('.')[-1]}") for i, _ in enumerate(crops)])]
             return jsonify({
                 "message": "Success",
                 "outputs": output_files

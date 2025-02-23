@@ -6,6 +6,7 @@ import glob
 import os
 import sys
 import math
+import subprocess
 
 # -------------------------------
 # Constants
@@ -24,7 +25,7 @@ prev_gray_frame = None
 # -------------------------------
 # Load MoveNet model
 # -------------------------------
-movenet = tf.saved_model.load('model')
+movenet = tf.saved_model.load('/Users/luis/Developer/Temporal/MediastreamTensor/VideoToShort/model')
 movenet_func = movenet.signatures['serving_default']
 
 # -------------------------------
@@ -374,29 +375,19 @@ class PersonTracker:
 # -------------------------------
 # Main Processing: Two-pass Video Processing
 # -------------------------------
-def process_video(input_path, output_path, coordinates, start_frame=None, end_frame=None):
-    cap = cv2.VideoCapture(input_path)
-    
-    # Get video properties
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # Validate frame ranges
-    start_frame = 0 if start_frame is None else max(0, start_frame)
-    end_frame = total_frames if end_frame is None else min(total_frames, end_frame)
-    
-    # Set starting position
-    if start_frame > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+def process_video(input_video, output_video, debug=False):
+    global prev_gray_frame
+    width, height, fps, total_frames = get_video_metadata(input_video)
     
     # First Pass: Detect and plan movements
     planner = MovementPlanner(fps)
+    video = cv2.VideoCapture(input_video)
     frame_count = 0
     prev_gray_frame = None
 
     print("First pass: Detecting centers and scenes...")
-    while cap.isOpened():
-        success, frame = cap.read()
+    while video.isOpened():
+        success, frame = video.read()
         if not success:
             break
 
@@ -420,22 +411,22 @@ def process_video(input_path, output_path, coordinates, start_frame=None, end_fr
         
         frame_count += 1
         print(f"Planning: {(frame_count / total_frames) * 100:.2f}%", end='\r')
-    cap.release()
+    video.release()
 
     # Get smoothed centers, now processed per scene
     smoothed_centers = planner.interpolate_and_smooth(total_frames)
 
     # Second Pass: Use the smoothed centers to crop each frame.
     print("\nSecond pass: Cropping video based on smoothed centers...")
-    cap = cv2.VideoCapture(input_path)
-    crop_width = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * ASPECT_RATIO)
-    output_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    video = cv2.VideoCapture(input_video)
+    crop_width = int(height * ASPECT_RATIO)
+    output_height = height
     output_width = crop_width
-    writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (output_width, output_height))
+    writer = cv2.VideoWriter(output_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (output_width, output_height))
     frame_count = 0
 
-    while cap.isOpened():
-        success, frame = cap.read()
+    while video.isOpened():
+        success, frame = video.read()
         if not success:
             break
 
@@ -446,41 +437,40 @@ def process_video(input_path, output_path, coordinates, start_frame=None, end_fr
             norm_center = DEFAULT_CENTER
 
         # Convert normalized center to pixel coordinates.
-        x_center = int(norm_center * cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        x_center = int(norm_center * width)
         x_start = x_center - (crop_width // 2)
         if x_start < 0:
             x_start = 0
-        elif x_start + crop_width > cap.get(cv2.CAP_PROP_FRAME_WIDTH):
-            x_start = cap.get(cv2.CAP_PROP_FRAME_WIDTH) - crop_width
+        elif x_start + crop_width > width:
+            x_start = width - crop_width
         x_end = x_start + crop_width
 
         cropped_frame = frame[:, x_start:x_end].copy()
 
-        # Draw debug visualizations only if debug flag is enabled
-        if debug:
-            # Draw purple dots for raw x-axis positions from key_frames
-            for key_frame in planner.frame_data:
-                key_frame_num, key_frame_x, _ = key_frame
-                if key_frame_num == frame_count:  # Only draw for the current frame
-                    # Convert normalized x position to pixel coordinates
-                    raw_x_center = int(key_frame_x * cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x_start
-                    cv2.circle(cropped_frame, (raw_x_center, output_height // 2), 5, (255, 0, 255), -1)  # Purple dot
+        # Draw purple dots for raw x-axis positions from key_frames
+        for key_frame in planner.frame_data:
+            key_frame_num, key_frame_x, _ = key_frame
+            if key_frame_num == frame_count:  # Only draw for the current frame
+                # Convert normalized x position to pixel coordinates
+                raw_x_center = int(key_frame_x * width) - x_start
+                cv2.circle(cropped_frame, (raw_x_center, height // 2), 5, (255, 0, 255), -1)  # Purple dot
 
+        if debug:
             # Overlay previous (red), current (green), and next (blue) center dots.
             if frame_count > 0:
                 prev_center = smoothed_centers[frame_count - 1]
-                prev_x = int(prev_center * cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x_start
-                cv2.circle(cropped_frame, (prev_x, output_height // 2), 5, (0, 0, 255), -1)
-            curr_x = int(norm_center * cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x_start
-            cv2.circle(cropped_frame, (curr_x, output_height // 2), 5, (0, 255, 0), -1)
+                prev_x = int(prev_center * width) - x_start
+                cv2.circle(cropped_frame, (prev_x, height // 2), 5, (0, 0, 255), -1)
+            curr_x = int(norm_center * width) - x_start
+            cv2.circle(cropped_frame, (curr_x, height // 2), 5, (0, 255, 0), -1)
             if frame_count < len(smoothed_centers) - 1:
                 next_center = smoothed_centers[frame_count + 1]
-                next_x = int(next_center * cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x_start
-                cv2.circle(cropped_frame, (next_x, output_height // 2), 5, (255, 0, 0), -1)
+                next_x = int(next_center * width) - x_start
+                cv2.circle(cropped_frame, (next_x, height // 2), 5, (255, 0, 0), -1)
             
             # If this frame was marked as a new scene, display "New Scene" in the center.
             if frame_count in [f_num for f_num, _, is_scene in planner.frame_data if is_scene]:
-                cv2.putText(cropped_frame, "New Scene", (crop_width // 2 - 50, output_height // 2),
+                cv2.putText(cropped_frame, "New Scene", (crop_width // 2 - 50, height // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
             
             # Also, run MoveNet on the frame and overlay the detected keypoints (in yellow).
@@ -490,14 +480,14 @@ def process_video(input_path, output_path, coordinates, start_frame=None, end_fr
             for kp in keypoints:
                 y, x, conf = kp[:3]
                 if conf > DETECTION_CONFIDENCE_THRESHOLD:
-                    x_pixel = int((x * cap.get(cv2.CAP_PROP_FRAME_WIDTH)) - x_start)
-                    y_pixel = int(y * cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    x_pixel = int((x * width) - x_start)
+                    y_pixel = int(y * height)
                     cv2.circle(cropped_frame, (x_pixel, y_pixel), 3, (0, 255, 255), -1)
 
         writer.write(cropped_frame)
         frame_count += 1
         print(f"Cropping: {(frame_count / total_frames) * 100:.2f}%", end='\r')
-    cap.release()
+    video.release()
     writer.release()
     print("\nProcessing complete.")
 
@@ -550,61 +540,60 @@ def process_frame(frame, width, height, output_width, output_height, tracker, me
 # Main Entry Point
 # -------------------------------
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Video cropping tool')
-    parser.add_argument('-i', '--input', required=True, help='Input video path')
+    parser = argparse.ArgumentParser(description='Process video for Instagram Reels/TikTok format')
+    parser.add_argument('-i', '--input', required=True, help='Input video file')
+    parser.add_argument('-o', '--output', help='Output video file (single output)')
+    parser.add_argument('-mo', '--multiple-outputs', nargs='+', help='Multiple outputs with frame ranges (format: output1.mp4 "start-end" output2.mp4 "start-end" ...)')
     
-    # Two mutually exclusive groups: either -o for single output or -c for multiple crops
-    output_group = parser.add_mutually_exclusive_group(required=True)
-    output_group.add_argument('-o', '--output', help='Single output video path')
-    output_group.add_argument('-c', '--crops', nargs='+', action='append',
-                            metavar=('OUTPUT_PATH', 'FRAME_RANGE'),
-                            help='Multiple crops: -c output1.mp4 "0-100" -c output2.mp4 "150-200" ...')
-
     args = parser.parse_args()
     
-    # Process the crops argument if present
-    if args.crops:
-        processed_crops = []
-        for crop in args.crops:
-            if len(crop) != 2:
-                parser.error("Each -c argument must have an output path and frame range")
-            
-            output_path = crop[0]
-            frame_range = crop[1]
-            
-            try:
-                start, end = map(int, frame_range.split('-'))
-                processed_crops.append({
-                    'output': output_path,
-                    'start_frame': start,
-                    'end_frame': end
-                })
-            except ValueError:
-                parser.error(f"Invalid frame range format: {frame_range}. Use 'start-end' format")
-                
-        args.processed_crops = processed_crops
-
+    # Validate arguments
+    if not args.output and not args.multiple_outputs:
+        parser.error("Either -o or -mo argument must be provided")
+    if args.output and args.multiple_outputs:
+        parser.error("Cannot use both -o and -mo arguments")
+    
     return args
+
+def process_multiple_outputs(input_file, outputs_and_ranges):
+    if len(outputs_and_ranges) % 2 != 0:
+        raise ValueError("Multiple outputs must be provided in pairs of output file and frame range")
+    
+    # First, process the video as usual with a temporary output
+    temp_output = "temp_processed.mp4"
+    process_video(input_file, temp_output)
+    
+    # Then create multiple segments from the processed video
+    for i in range(0, len(outputs_and_ranges), 2):
+        output_file = outputs_and_ranges[i]
+        frame_range = outputs_and_ranges[i + 1]
+        
+        try:
+            start_frame, end_frame = map(int, frame_range.strip('"').split('-'))
+        except ValueError:
+            raise ValueError(f"Invalid frame range format: {frame_range}. Must be 'start-end'")
+        
+        # Now trim the processed video
+        trim_command = [
+            'ffmpeg', '-i', temp_output,
+            '-vf', f'trim=start_frame={start_frame}:end_frame={end_frame},setpts=PTS-STARTPTS',
+            '-an', '-c:v', 'libx264',
+            output_file
+        ]
+        subprocess.run(trim_command, check=True)
+    
+    # Clean up temporary file
+    os.remove(temp_output)
 
 def main():
     args = parse_arguments()
     
-    # Load the video and get coordinates (assuming this is already implemented)
-    coordinates = get_coordinates(args.input)
-    
-    if args.output:
-        # Single output mode
-        process_video(args.input, args.output, coordinates)
+    if args.multiple_outputs:
+        # Handle multiple outputs with frame ranges
+        process_multiple_outputs(args.input, args.multiple_outputs)
     else:
-        # Multiple crops mode
-        for crop in args.processed_crops:
-            process_video(
-                args.input,
-                crop['output'],
-                coordinates,
-                start_frame=crop['start_frame'],
-                end_frame=crop['end_frame']
-            )
+        # Original single output processing
+        process_video(args.input, args.output)
 
 if __name__ == "__main__":
     main()
