@@ -13,6 +13,7 @@ DETECTION_CONFIDENCE_THRESHOLD = 0.3
 MOVE_NET_INPUT_SIZE = (192, 192)
 DEFAULT_CENTER = 0.5
 ASPECT_RATIO = 9 / 16
+SCENE_CHANGE_THRESHOLD = 3000  # Added from second file
 
 # -------------------------------
 # Global variable for scene change detection
@@ -24,6 +25,40 @@ prev_gray_frame = None
 # -------------------------------
 movenet = tf.saved_model.load('model')
 movenet_func = movenet.signatures['serving_default']
+
+# -------------------------------
+# PersonTracker class
+# -------------------------------
+class PersonTracker:
+    def __init__(self, smoothing_rate=0.05, confidence_margin=0.15, wait_frames=30, lock_frames=45, min_confidence=50):
+        """
+        Simple and reliable tracking with:
+        - Smooth camera movement
+        - Stable target switching
+        - Scene change handling
+        """
+        self.smoothing_rate = smoothing_rate
+        self.confidence_margin = confidence_margin
+        self.wait_frames = wait_frames
+        self.lock_frames = lock_frames
+        self.min_confidence = min_confidence
+        self.reset()
+
+    def reset(self):
+        self.current_id = None
+        self.current_confidence = None
+        self.pos_x = 0.5  # normalized center
+        self.pos_y = 0.5
+        self.new_target_id = None
+        self.new_target_x = None
+        self.new_target_y = None
+        self.new_target_confidence = None
+        self.new_target_frames = 0
+        self.lock_countdown = 0
+        self.lost_frames = 0
+        self.first_frame_of_scene = False
+
+    # ... copy rest of PersonTracker class methods from second file ...
 
 # -------------------------------
 # Utility: Preprocess frame for MoveNet
@@ -86,6 +121,17 @@ def draw_keypoints(frame, keypoints, x_offset=0):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
     return frame
 
+# -------------------------------
+# Utility functions
+# -------------------------------
+def cluster_people(people, threshold=0.05):
+    """
+    Merge detections that are very close.
+    Each detection in `people` is a tuple (id, kp) where kp = (y, x, confidence).
+    Returns a list of clusters as tuples: (cluster_id, avg_x, avg_y, max_confidence).
+    """
+    # ... copy cluster_people implementation from second file ...
+
 def process_video(input_source=None, output_path="output_video.mp4", debug=False):
     global prev_gray_frame
     
@@ -97,6 +143,14 @@ def process_video(input_source=None, output_path="output_video.mp4", debug=False
     
     width, height, fps, total_frames = get_video_metadata(input_source)
     crop_width = int(height * ASPECT_RATIO)
+    
+    # Initialize tracker
+    tracker = PersonTracker(
+        smoothing_rate=0.05,
+        confidence_margin=0.15,
+        wait_frames=int(fps * 1.0),  # 1 second buffer
+        lock_frames=int(fps * 1.5)    # 1.5 second lock
+    )
     
     cap = cv2.VideoCapture(input_source)
     writer = cv2.VideoWriter(output_path, 
@@ -112,35 +166,13 @@ def process_video(input_source=None, output_path="output_video.mp4", debug=False
         if not ret:
             break
             
-        if debug:
-            cv2.imwrite(f"debug_frame_{frame_count}.jpg", frame)
-            
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frame_diff = mse(prev_gray_frame, gray)
-        prev_gray_frame = gray.copy()
+        # Process frame using the new tracker
+        processed_frame, state_text = process_frame(
+            frame, width, height, crop_width, height, 
+            tracker, merge_distance=0.05, frame_count=frame_count, debug=debug
+        )
         
-        input_tensor = prepare_input_tensor(frame)
-        outputs = movenet_func(input_tensor)
-        keypoints = outputs['output_0'].numpy()[0]
-        
-        confidences = keypoints[:, 2]
-        weights = confidences / np.sum(confidences)
-        center_x = np.sum(keypoints[:, 1] * weights)
-        
-        x_center = int(center_x * width)
-        x_start = x_center - (crop_width // 2)
-        x_start = max(0, min(width - crop_width, x_start))
-        x_end = x_start + crop_width
-        
-        cropped_frame = frame[:, x_start:x_end].copy()
-        
-        if debug:
-            cropped_frame = draw_keypoints(cropped_frame, keypoints, x_start)
-            if frame_diff > 3000: 
-                cv2.putText(cropped_frame, "Scene Change", (crop_width//2 - 50, height//2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-        
-        writer.write(cropped_frame)
+        writer.write(processed_frame)
         frame_count += 1
         print(f"Progress: {(frame_count/total_frames)*100:.2f}%", end='\r')
     
