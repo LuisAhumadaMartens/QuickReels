@@ -188,6 +188,28 @@ h1 {
   transform: translateY(0);
 }
 
+.button:disabled,
+.generate-btn:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.button:disabled:hover,
+.generate-btn:disabled:hover {
+  transform: none;
+  background: #e2e8f0;
+  box-shadow: none;
+}
+
+.button:disabled::before,
+.generate-btn:disabled::before,
+.generate-btn:disabled::after {
+  display: none;
+}
+
 .url-input {
   padding: 1rem 1.75rem;
   font-size: 1rem;
@@ -267,11 +289,15 @@ h1 {
   border-color: #1e40af;
 }
 
+.toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .timestamp-container {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  margin-bottom: 2rem;
 }
 
 .timestamp-pair {

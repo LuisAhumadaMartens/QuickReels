@@ -7,6 +7,12 @@ interface TimeStampPair {
   end: string;
 }
 
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
 function App() {
   const [currentPage, setCurrentPage] = useState<'home' | 'editor' | 'preview'>('home');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -18,6 +24,9 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [savedFilePath, setSavedFilePath] = useState<string | null>(null);
   const [consoleOutput, setConsoleOutput] = useState<string[]>([]);
+  const [outputPaths, setOutputPaths] = useState<string[]>([]);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoDuration, setVideoDuration] = useState<string>("00:00");
 
   function showUrlInput() {
     const urlInput = document.querySelector('.url-input');
@@ -34,6 +43,16 @@ function App() {
 
     setIsUploading(true);
     setSelectedFile(file);
+    const url = URL.createObjectURL(file);
+    setVideoUrl(url);
+
+    // Get video duration
+    const video = document.createElement('video');
+    video.src = url;
+    video.onloadedmetadata = () => {
+      setVideoDuration(formatDuration(video.duration));
+    };
+    
     appendToConsole(`File selected: ${file.name}`);
     appendToConsole(`Size: ${(file.size / (1024 * 1024)).toFixed(2)} MB`);
     appendToConsole(`Format: ${file.name.split('.').pop()?.toLowerCase()}`);
@@ -90,6 +109,24 @@ function App() {
     );
   }
 
+  // Add function to validate timestamps
+  const isTimestampsValid = () => {
+    const isValid = timeStamps.every(pair => {
+      if (!pair.start || !pair.end) return true;
+      
+      const [startMin, startSec] = pair.start.split(':').map(Number);
+      const [endMin, endSec] = pair.end.split(':').map(Number);
+      
+      const startSeconds = startMin * 60 + startSec;
+      const endSeconds = endMin * 60 + endSec;
+      
+      return endSeconds > startSeconds;
+    });
+    
+    console.log('Timestamps valid:', isValid);
+    return isValid;
+  };
+
   async function handleCreateReels() {
     if (!savedFilePath) {
       appendToConsole('No saved file path available');
@@ -126,11 +163,13 @@ function App() {
       if (response.ok) {
         if (mode === 'manual') {
           appendToConsole('Multiple reels created successfully!');
+          setOutputPaths(data.outputs || []);
           data.outputs?.forEach((output: string, index: number) => {
             appendToConsole(`Reel ${index + 1} saved as: ${output}`);
           });
         } else {
           appendToConsole('Single reel created successfully!');
+          setOutputPaths([data.output]);
           appendToConsole(`Output saved as: ${data.output}`);
         }
         setCurrentPage('preview');
@@ -171,63 +210,31 @@ function App() {
           >
             Enter YouTube URL
           </button>
-          <button 
-            className="button generate-btn"
-            onClick={handleYoutubeSubmit}
-            disabled={!selectedFile}
-          >
-            Generate
-          </button>
         </div>
-        {consoleOutput.length > 0 && (
-          <div className="console">
-            {consoleOutput.map((line, index) => (
-              <div key={index}>{line}</div>
-            ))}
-          </div>
-        )}
       </div>
     );
   }
 
   if (currentPage === 'preview') {
-    const numReels = mode === 'manual' 
-      ? timeStamps.filter(pair => pair.start && pair.end).length 
-      : 1;
-    const reels = Array.from({ length: numReels }, (_, i) => i + 1);
-
     return (
       <div className="container preview-container">
         <h1 className="editor-logo">QuickReels</h1>
         <h2 className="preview-title">Your reels are here!</h2>
         <div className="reels-grid">
-          {reels.map((reelNum) => (
-            <div key={reelNum} className="reel-container">
-              <div className="reel-number">{reelNum}</div>
+          {outputPaths.map((outputPath, index) => (
+            <div key={index} className="reel-container">
+              <div className="reel-number">{index + 1}</div>
               <div className="reel-video-container">
-                {selectedFile ? (
-                  <video
-                    src={URL.createObjectURL(selectedFile)}
-                    controls
-                    className="reel-video"
-                    playsInline
-                  />
-                ) : (
-                  <div className="reel-placeholder">
-                    <p>Reel {reelNum}</p>
-                  </div>
-                )}
+                <video
+                  src={`http://localhost:8000/uploads/output_${index + 1}.mp4`}
+                  controls
+                  className="reel-video"
+                  playsInline
+                />
               </div>
             </div>
           ))}
         </div>
-        {consoleOutput.length > 0 && (
-          <div className="console">
-            {consoleOutput.map((line, index) => (
-              <div key={index}>{line}</div>
-            ))}
-          </div>
-        )}
       </div>
     );
   }
@@ -236,9 +243,9 @@ function App() {
     <div className="container editor-container">
       <h1 className="editor-logo">QuickReels</h1>
       <div className="video-preview">
-        {selectedFile ? (
+        {selectedFile && videoUrl ? (
           <video 
-            src={URL.createObjectURL(selectedFile)} 
+            src={videoUrl}
             controls 
             className="video-player"
           />
@@ -259,8 +266,9 @@ function App() {
         <button
           className={`toggle-btn ${mode === 'ai' ? 'active' : ''}`}
           onClick={() => setMode('ai')}
+          disabled={true}
         >
-          AI
+          Auto-Highlight
         </button>
       </div>
 
@@ -274,14 +282,16 @@ function App() {
                 value={pair.start}
                 onChange={(e) => updateTimeStamp(pair.id, 'start', e.target.value)}
                 className="timestamp-input"
+                maxLength={5}
               />
               <span className="timestamp-separator">to</span>
               <input
                 type="text"
-                placeholder="00:00"
+                placeholder={videoDuration}
                 value={pair.end}
                 onChange={(e) => updateTimeStamp(pair.id, 'end', e.target.value)}
                 className="timestamp-input"
+                maxLength={5}
               />
             </div>
           ))}
@@ -300,10 +310,11 @@ function App() {
       )}
 
       <button 
-        className="button generate-btn create-reels-btn"
+        className={`button generate-btn create-reels-btn ${mode === 'manual' && !isTimestampsValid() ? 'disabled' : ''}`}
         onClick={handleCreateReels}
+        disabled={mode === 'manual' && !isTimestampsValid()}
       >
-        Create my reels!
+        Generate Reels
       </button>
     </div>
   );

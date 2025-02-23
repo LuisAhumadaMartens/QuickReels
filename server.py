@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import subprocess
 import os
@@ -18,6 +18,16 @@ CORS(app)
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+def clean_upload_directory():
+    """Remove all files from the upload directory."""
+    for file in os.listdir(UPLOAD_DIR):
+        file_path = os.path.join(UPLOAD_DIR, file)
+        try:
+            if os.path.isfile(file_path):
+                os.unlink(file_path)
+        except Exception as e:
+            logger.error(f"Error deleting {file_path}: {e}")
+
 @app.route('/save-file', methods=['POST'])
 def save_file():
     try:
@@ -27,6 +37,9 @@ def save_file():
         file = request.files['file']
         if file.filename == '':
             return jsonify({"error": "No file selected"}), 400
+
+        # Clean up the uploads directory before saving new file
+        clean_upload_directory()
 
         # Save file
         filepath = os.path.join(UPLOAD_DIR, file.filename)
@@ -115,6 +128,11 @@ def run_script():
     except Exception as e:
         logger.error(f"Error running script: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
+
+# Add route to serve files from uploads directory
+@app.route('/uploads/<path:filename>')
+def serve_file(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
 
 if __name__ == '__main__':
     app.run(host='localhost', port=8000, debug=True)
