@@ -137,15 +137,29 @@ function App() {
     }
 
     setIsProcessing(true);
-    setProcessingProgress(0);  // Reset progress
-    setStatusMessage("Initializing..."); // Set initial status
+    setProcessingProgress(0);
+    setStatusMessage("Initializing...");
     appendToConsole('Starting video processing...');
+    
+    // Start polling for progress immediately
+    const progressInterval = setInterval(async () => {
+      try {
+        const progressResponse = await fetch('http://localhost:8000/get-progress');
+        const progressData = await progressResponse.json();
+        
+        if (progressData.progress) {
+          setProcessingProgress(progressData.progress);
+          setStatusMessage(progressData.status);
+        }
+      } catch (error) {
+        console.error('Error fetching progress:', error);
+      }
+    }, 1000);
     
     try {
       const requestBody = {
         input_path: savedFilePath,
         output_type: mode === 'manual' ? 'multiple' : 'single',
-        // Only include crops if in manual mode and there are valid timestamps
         ...(mode === 'manual' && {
           crops: timeStamps
             .filter(pair => pair.start && pair.end)
@@ -156,7 +170,8 @@ function App() {
         })
       };
 
-      const response = await fetch('http://localhost:8000/run-script', {
+      // Start the processing
+      const processResponse = await fetch('http://localhost:8000/run-script', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -164,25 +179,9 @@ function App() {
         body: JSON.stringify(requestBody)
       });
 
-      // Update the event source handler
-      const eventSource = new EventSource('http://localhost:8000/progress');
-      eventSource.onmessage = (event) => {
-        console.log('Received event data:', event.data); // Debug log
-        const data = JSON.parse(event.data); // Parse the JSON data
-        if (data.includes("Analyzing")) {
-          const match = data.match(/Analyzing:\s*(\d+\.\d+)%/);
-          if (match) {
-            const progress = parseFloat(match[1]);
-            setProcessingProgress(progress);
-            setStatusMessage(data);
-          }
-        }
-      };
-
-      const data = await response.json();
-      eventSource.close();
+      const data = await processResponse.json();
       
-      if (response.ok) {
+      if (processResponse.ok) {
         if (mode === 'manual') {
           appendToConsole('Multiple reels created successfully!');
           setOutputPaths(data.outputs || []);
@@ -201,6 +200,8 @@ function App() {
     } catch (error) {
       appendToConsole(`Error processing video: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
+      // Clear the interval and reset states
+      clearInterval(progressInterval);
       setIsProcessing(false);
       setProcessingProgress(0);
     }
@@ -255,6 +256,7 @@ function App() {
                   controls
                   className="reel-video"
                   playsInline
+                  style={{ maxHeight: '600px', width: 'auto' }}
                 />
               </div>
             </div>
@@ -353,9 +355,6 @@ function App() {
               style={{ width: `${processingProgress}%` }}
             />
           </div>
-          <p className="progress-text">
-            {processingProgress > 0 ? `${processingProgress.toFixed(2)}%` : statusMessage}
-          </p>
         </div>
       )}
     </div>

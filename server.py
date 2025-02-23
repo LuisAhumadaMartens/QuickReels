@@ -6,6 +6,7 @@ from pathlib import Path
 import traceback
 import logging
 import cv2
+import json
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -40,6 +41,13 @@ def save_file():
 
         # Clean up the uploads directory before saving new file
         clean_upload_directory()
+
+        # Reset progress.json
+        with open('progress.json', 'w') as f:
+            json.dump({
+                'progress': 0,
+                'status': 'Initializing...'
+            }, f)
 
         # Save file
         filepath = os.path.join(UPLOAD_DIR, file.filename)
@@ -133,6 +141,18 @@ def run_script():
 @app.route('/uploads/<path:filename>')
 def serve_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
+
+# Add new endpoint to get progress
+@app.route('/get-progress', methods=['GET'])
+def get_progress():
+    try:
+        with open('progress.json', 'r') as f:
+            progress_data = json.load(f)
+        return jsonify(progress_data)
+    except FileNotFoundError:
+        return jsonify({'progress': 0, 'status': 'Initializing...'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='localhost', port=8000, debug=True)

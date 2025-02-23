@@ -7,6 +7,15 @@ import os
 import sys
 import math
 import subprocess
+import json
+
+# -------------------------------
+# GPU Configuration
+# -------------------------------
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 
 # -------------------------------
 # Constants
@@ -32,9 +41,11 @@ movenet_func = movenet.signatures['serving_default']
 # Utility: Preprocess frame for MoveNet
 # -------------------------------
 def prepare_input_tensor(frame):
-    input_tensor = tf.convert_to_tensor(frame)
-    input_tensor = tf.image.resize(input_tensor, MOVE_NET_INPUT_SIZE)
-    input_tensor = tf.cast(input_tensor, dtype=tf.int32)
+    # Resize with OpenCV first (faster)
+    frame = cv2.resize(frame, MOVE_NET_INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
+    
+    # Convert to tensor and add batch dimension
+    input_tensor = tf.convert_to_tensor(frame, dtype=tf.int32)
     input_tensor = tf.expand_dims(input_tensor, axis=0)
     return input_tensor
 
@@ -411,6 +422,14 @@ def process_video(input_video, output_video, debug=False):
         
         frame_count += 1
         print(f"Analyzing: {(frame_count / total_frames) * 100:.2f}%", end='\r')
+
+        # Update progress
+        progress = (frame_count / total_frames) * 100
+        with open('progress.json', 'w') as f:
+            json.dump({
+                'progress': progress,
+                'status': f"Analyzing: {progress:.2f}%"
+            }, f)
     video.release()
 
     # Get smoothed centers, now processed per scene
@@ -447,15 +466,16 @@ def process_video(input_video, output_video, debug=False):
 
         cropped_frame = frame[:, x_start:x_end].copy()
 
-        # Draw purple dots for raw x-axis positions from key_frames
-        for key_frame in planner.frame_data:
-            key_frame_num, key_frame_x, _ = key_frame
-            if key_frame_num == frame_count:  # Only draw for the current frame
-                # Convert normalized x position to pixel coordinates
-                raw_x_center = int(key_frame_x * width) - x_start
-                cv2.circle(cropped_frame, (raw_x_center, height // 2), 5, (255, 0, 255), -1)  # Purple dot
-
         if debug:
+        # Draw purple dots for raw x-axis positions from key_frames
+            for key_frame in planner.frame_data:
+                key_frame_num, key_frame_x, _ = key_frame
+                if key_frame_num == frame_count:  # Only draw for the current frame
+                    # Convert normalized x position to pixel coordinates
+                    raw_x_center = int(key_frame_x * width) - x_start
+                    cv2.circle(cropped_frame, (raw_x_center, height // 2), 5, (255, 0, 255), -1)  # Purple dot
+
+        
             # Overlay previous (red), current (green), and next (blue) center dots.
             if frame_count > 0:
                 prev_center = smoothed_centers[frame_count - 1]
@@ -487,6 +507,14 @@ def process_video(input_video, output_video, debug=False):
         writer.write(cropped_frame)
         frame_count += 1
         print(f"Cropping: {(frame_count / total_frames) * 100:.2f}%", end='\r')
+
+        # Update progress
+        progress = (frame_count / total_frames) * 100
+        with open('progress.json', 'w') as f:
+            json.dump({
+                'progress': progress,
+                'status': f"Generating reels... {progress:.2f}%"
+            }, f)
     video.release()
     writer.release()
     print("\nProcessing complete.")
