@@ -385,7 +385,7 @@ def process_video(input_video, output_video, debug=False):
     frame_count = 0
     prev_gray_frame = None
 
-    print("First pass: Detecting centers and scenes...")
+    print("Initializing...")
     while video.isOpened():
         success, frame = video.read()
         if not success:
@@ -410,7 +410,7 @@ def process_video(input_video, output_video, debug=False):
             planner.plan_movement(frame_count, None, frame_diff, scene_change_threshold=3000)
         
         frame_count += 1
-        print(f"Planning: {(frame_count / total_frames) * 100:.2f}%", end='\r')
+        print(f"Analyzing: {(frame_count / total_frames) * 100:.2f}%", end='\r')
     video.release()
 
     # Get smoothed centers, now processed per scene

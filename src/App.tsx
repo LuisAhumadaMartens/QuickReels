@@ -27,6 +27,9 @@ function App() {
   const [outputPaths, setOutputPaths] = useState<string[]>([]);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState<string>("00:00");
+  const [processingProgress, setProcessingProgress] = useState<number>(0);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string>("");
 
   function showUrlInput() {
     const urlInput = document.querySelector('.url-input');
@@ -133,6 +136,9 @@ function App() {
       return;
     }
 
+    setIsProcessing(true);
+    setProcessingProgress(0);  // Reset progress
+    setStatusMessage("Initializing..."); // Set initial status
     appendToConsole('Starting video processing...');
     
     try {
@@ -158,7 +164,23 @@ function App() {
         body: JSON.stringify(requestBody)
       });
 
+      // Update the event source handler
+      const eventSource = new EventSource('http://localhost:8000/progress');
+      eventSource.onmessage = (event) => {
+        console.log('Received event data:', event.data); // Debug log
+        const data = JSON.parse(event.data); // Parse the JSON data
+        if (data.includes("Analyzing")) {
+          const match = data.match(/Analyzing:\s*(\d+\.\d+)%/);
+          if (match) {
+            const progress = parseFloat(match[1]);
+            setProcessingProgress(progress);
+            setStatusMessage(data);
+          }
+        }
+      };
+
       const data = await response.json();
+      eventSource.close();
       
       if (response.ok) {
         if (mode === 'manual') {
@@ -178,6 +200,9 @@ function App() {
       }
     } catch (error) {
       appendToConsole(`Error processing video: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsProcessing(false);
+      setProcessingProgress(0);
     }
   }
 
@@ -256,66 +281,83 @@ function App() {
         )}
       </div>
 
-      <div className="mode-toggle">
-        <button
-          className={`toggle-btn ${mode === 'manual' ? 'active' : ''}`}
-          onClick={() => setMode('manual')}
-        >
-          Manual
-        </button>
-        <button
-          className={`toggle-btn ${mode === 'ai' ? 'active' : ''}`}
-          onClick={() => setMode('ai')}
-          disabled={true}
-        >
-          Auto-Highlight
-        </button>
-      </div>
-
-      {mode === 'manual' ? (
-        <div className="timestamp-container">
-          {timeStamps.map((pair) => (
-            <div key={pair.id} className="timestamp-pair">
-              <input
-                type="text"
-                placeholder="00:00"
-                value={pair.start}
-                onChange={(e) => updateTimeStamp(pair.id, 'start', e.target.value)}
-                className="timestamp-input"
-                maxLength={5}
-              />
-              <span className="timestamp-separator">to</span>
-              <input
-                type="text"
-                placeholder={videoDuration}
-                value={pair.end}
-                onChange={(e) => updateTimeStamp(pair.id, 'end', e.target.value)}
-                className="timestamp-input"
-                maxLength={5}
-              />
-            </div>
-          ))}
-          {timeStamps.length < 5 && (
-            <button className="add-timestamp-btn" onClick={addTimeStampPair}>
-              <PlusCircle size={20} />
-              Add Timestamp
+      {!isProcessing ? (
+        <>
+          <div className="mode-toggle">
+            <button
+              className={`toggle-btn ${mode === 'manual' ? 'active' : ''}`}
+              onClick={() => setMode('manual')}
+            >
+              Manual
             </button>
+            <button
+              className={`toggle-btn ${mode === 'ai' ? 'active' : ''}`}
+              onClick={() => setMode('ai')}
+              disabled={true}
+            >
+              Auto-Highlight
+            </button>
+          </div>
+
+          {mode === 'manual' ? (
+            <div className="timestamp-container">
+              {timeStamps.map((pair) => (
+                <div key={pair.id} className="timestamp-pair">
+                  <input
+                    type="text"
+                    placeholder="00:00"
+                    value={pair.start}
+                    onChange={(e) => updateTimeStamp(pair.id, 'start', e.target.value)}
+                    className="timestamp-input"
+                    maxLength={5}
+                  />
+                  <span className="timestamp-separator">to</span>
+                  <input
+                    type="text"
+                    placeholder={videoDuration}
+                    value={pair.end}
+                    onChange={(e) => updateTimeStamp(pair.id, 'end', e.target.value)}
+                    className="timestamp-input"
+                    maxLength={5}
+                  />
+                </div>
+              ))}
+              {timeStamps.length < 5 && (
+                <button className="add-timestamp-btn" onClick={addTimeStampPair}>
+                  <PlusCircle size={20} />
+                  Add Timestamp
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="ai-message">
+              <Wand2 size={24} className="wand-icon" />
+              <p>We'll take it from here then. Hit create!</p>
+            </div>
           )}
-        </div>
+
+          <button 
+            className={`button generate-btn create-reels-btn ${mode === 'manual' && !isTimestampsValid() ? 'disabled' : ''}`}
+            onClick={handleCreateReels}
+            disabled={mode === 'manual' && !isTimestampsValid()}
+          >
+            Generate Reels
+          </button>
+        </>
       ) : (
-        <div className="ai-message">
-          <Wand2 size={24} className="wand-icon" />
-          <p>We'll take it from here then. Hit create!</p>
+        <div className="processing-container">
+          <p className="status-message">{statusMessage}</p>
+          <div className="progress-bar">
+            <div 
+              className="progress-fill"
+              style={{ width: `${processingProgress}%` }}
+            />
+          </div>
+          <p className="progress-text">
+            {processingProgress > 0 ? `${processingProgress.toFixed(2)}%` : statusMessage}
+          </p>
         </div>
       )}
-
-      <button 
-        className={`button generate-btn create-reels-btn ${mode === 'manual' && !isTimestampsValid() ? 'disabled' : ''}`}
-        onClick={handleCreateReels}
-        disabled={mode === 'manual' && !isTimestampsValid()}
-      >
-        Generate Reels
-      </button>
     </div>
   );
 }
