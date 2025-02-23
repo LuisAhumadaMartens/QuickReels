@@ -613,6 +613,60 @@ def process_multiple_outputs(input_file, outputs_and_ranges):
     # Clean up temporary file
     os.remove(temp_output)
 
+def process_video_with_audio(input_file, output_file, start_time, duration):
+    """Process a video segment while preserving audio"""
+    cmd = [
+        'ffmpeg', '-i', input_file,
+        '-ss', str(start_time),
+        '-t', str(duration),
+        '-c:a', 'aac',  # Specify audio codec
+        output_file
+    ]
+    subprocess.run(cmd, check=True)
+
+def concatenate_videos_with_audio(segment_files, final_output):
+    """Concatenate video segments while preserving audio"""
+    # Create temporary concat file
+    with open('temp_segments.txt', 'w') as f:
+        for segment in segment_files:
+            f.write(f"file '{segment}'\n")
+    
+    # Concatenate all segments
+    cmd = [
+        'ffmpeg',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', 'temp_segments.txt',
+        '-c', 'copy',
+        final_output
+    ]
+    subprocess.run(cmd, check=True)
+    
+    # Cleanup temp file
+    os.remove('temp_segments.txt')
+
+def process_all_segments(input_file, frame_cuts):
+    """Process all segments with audio"""
+    segment_files = []
+    
+    # Process each segment
+    for i, (start_frame, end_frame) in enumerate(frame_cuts):
+        # Convert frames to seconds (assuming 30fps or your video's actual fps)
+        start_time = start_frame / 30  # adjust fps as needed
+        duration = (end_frame - start_frame) / 30
+        
+        temp_output = f'segment_{i}.mp4'
+        process_video_with_audio(input_file, temp_output, start_time, duration)
+        segment_files.append(temp_output)
+    
+    # Concatenate all segments
+    final_output = 'final_output.mp4'  # or your desired output name
+    concatenate_videos_with_audio(segment_files, final_output)
+    
+    # Cleanup temporary segment files
+    for segment in segment_files:
+        os.remove(segment)
+
 def main():
     args = parse_arguments()
     

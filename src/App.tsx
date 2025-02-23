@@ -268,7 +268,7 @@ function App() {
   if (currentPage === 'preview') {
     return (
       <div className="container preview-container">
-        <h1 className="editor-logo">QuickReels</h1>
+        <h1 className="editor-logo" onClick={() => window.location.reload()} style={{ cursor: 'pointer' }}>QuickReels</h1>
         <h2 className="preview-title">Your reels are here!</h2>
         <div className="reels-grid">
           {outputPaths.map((outputPath, index) => (
@@ -291,7 +291,7 @@ function App() {
 
   return (
     <div className="container editor-container">
-      <h1 className="editor-logo">QuickReels</h1>
+      <h1 className="editor-logo" onClick={() => window.location.reload()} style={{ cursor: 'pointer' }}>QuickReels</h1>
       <div className="video-preview">
         {selectedFile && videoUrl ? (
           <video 
