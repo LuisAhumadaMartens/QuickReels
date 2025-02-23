@@ -1,0 +1,5 @@
+# Ignore upload folder and all its contents
+/upload/
+
+# Ignore progress.json file
+progress.json 
