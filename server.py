@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import subprocess
 import os
@@ -17,10 +17,6 @@ CORS(app)
 # Create uploads directory if it doesn't exist
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-@app.route('/')
-def serve_html():
-    return send_from_directory('.', 'index.html')
 
 @app.route('/save-file', methods=['POST'])
 def save_file():
