@@ -42,13 +42,6 @@ def save_file():
         # Clean up the uploads directory before saving new file
         clean_upload_directory()
 
-        # Reset progress.json
-        with open('progress.json', 'w') as f:
-            json.dump({
-                'progress': 0,
-                'status': 'Initializing...'
-            }, f)
-
         # Save file
         filepath = os.path.join(UPLOAD_DIR, file.filename)
         file.save(filepath)
@@ -75,11 +68,14 @@ def run_script():
             raise Exception("Could not open video file")
         
         fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_duration = total_frames / fps
         cap.release()
 
         def timestamp_to_seconds(timestamp):
             # Convert "MM:SS" format to seconds
             if not timestamp:
+                # For empty start, return 0. For empty end, return total duration
                 return 0
             parts = timestamp.split(':')
             if len(parts) == 2:
@@ -105,7 +101,7 @@ def run_script():
                 
                 # Convert timestamp to seconds, then to frames
                 start_seconds = timestamp_to_seconds(crop['start'])
-                end_seconds = timestamp_to_seconds(crop['end'])
+                end_seconds = timestamp_to_seconds(crop['end']) or total_duration
                 
                 start_frame = int(start_seconds * fps)
                 end_frame = int(end_seconds * fps)

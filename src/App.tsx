@@ -112,21 +112,42 @@ function App() {
     );
   }
 
-  // Add function to validate timestamps
+  // Update isTimestampsValid function
   const isTimestampsValid = () => {
+    // Convert video duration (MM:SS) to seconds
+    const [durationMin, durationSec] = videoDuration.split(':').map(Number);
+    const maxDurationInSeconds = durationMin * 60 + durationSec;
+
     const isValid = timeStamps.every(pair => {
-      if (!pair.start || !pair.end) return true;
+      // If both timestamps are empty, consider it valid
+      if (!pair.start && !pair.end) return true;
       
-      const [startMin, startSec] = pair.start.split(':').map(Number);
-      const [endMin, endSec] = pair.end.split(':').map(Number);
-      
-      const startSeconds = startMin * 60 + startSec;
-      const endSeconds = endMin * 60 + endSec;
-      
-      return endSeconds > startSeconds;
+      // Convert timestamps to seconds for comparison
+      let startSeconds = 0;
+      let endSeconds = maxDurationInSeconds;
+
+      if (pair.start) {
+        const [startMin, startSec] = pair.start.split(':').map(Number);
+        startSeconds = startMin * 60 + startSec;
+        // Check if start is valid (between 0 and video duration)
+        if (startSeconds < 0 || startSeconds > maxDurationInSeconds) {
+          return false;
+        }
+      }
+
+      if (pair.end) {
+        const [endMin, endSec] = pair.end.split(':').map(Number);
+        endSeconds = endMin * 60 + endSec;
+        // Check if end is valid (between 0 and video duration)
+        if (endSeconds < 0 || endSeconds > maxDurationInSeconds) {
+          return false;
+        }
+      }
+
+      // Check if start is before end
+      return startSeconds < endSeconds;
     });
-    
-    console.log('Timestamps valid:', isValid);
+
     return isValid;
   };
 
@@ -162,7 +183,7 @@ function App() {
         output_type: mode === 'manual' ? 'multiple' : 'single',
         ...(mode === 'manual' && {
           crops: timeStamps
-            .filter(pair => pair.start && pair.end)
+            .filter(pair => pair.start || pair.end) // Changed to include pairs with at least one timestamp
             .map(pair => ({
               start: pair.start,
               end: pair.end
@@ -256,7 +277,6 @@ function App() {
                   controls
                   className="reel-video"
                   playsInline
-                  style={{ maxHeight: '600px', width: 'auto' }}
                 />
               </div>
             </div>
