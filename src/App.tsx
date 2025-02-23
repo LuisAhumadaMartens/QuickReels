@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { PlusCircle, Wand2 } from 'lucide-react';
+import InputMask from 'react-input-mask';
 
 interface TimeStampPair {
   id: number;
@@ -100,17 +101,19 @@ function App() {
     }
   }
 
-  function updateTimeStamp(
+  const handleTimeChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
     id: number,
-    field: 'start' | 'end',
-    value: string
-  ) {
+    field: 'start' | 'end'
+  ) => {
+    const value = e.target.value;
+    
     setTimeStamps(
       timeStamps.map((pair) =>
         pair.id === id ? { ...pair, [field]: value } : pair
       )
     );
-  }
+  };
 
   // Update isTimestampsValid function
   const isTimestampsValid = () => {
@@ -325,22 +328,22 @@ function App() {
             <div className="timestamp-container">
               {timeStamps.map((pair) => (
                 <div key={pair.id} className="timestamp-pair">
-                  <input
-                    type="text"
-                    placeholder="00:00"
+                  <InputMask
+                    mask="99:99"
+                    maskChar="0"
                     value={pair.start}
-                    onChange={(e) => updateTimeStamp(pair.id, 'start', e.target.value)}
+                    onChange={(e) => handleTimeChange(e, pair.id, 'start')}
                     className="timestamp-input"
-                    maxLength={5}
+                    placeholder="00:00"
                   />
                   <span className="timestamp-separator">to</span>
-                  <input
-                    type="text"
-                    placeholder={videoDuration}
+                  <InputMask
+                    mask="99:99"
+                    maskChar="0"
                     value={pair.end}
-                    onChange={(e) => updateTimeStamp(pair.id, 'end', e.target.value)}
+                    onChange={(e) => handleTimeChange(e, pair.id, 'end')}
                     className="timestamp-input"
-                    maxLength={5}
+                    placeholder={videoDuration}
                   />
                 </div>
               ))}
