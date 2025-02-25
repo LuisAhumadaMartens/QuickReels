@@ -99,14 +99,13 @@ def run_script():
                 output_name = f"output_{i+1}.{input_path.split('.')[-1]}"
                 output_path = os.path.join(UPLOAD_DIR, output_name)
                 
-                # Convert timestamp to seconds, then to frames
-                start_seconds = timestamp_to_seconds(crop['start'])
-                end_seconds = timestamp_to_seconds(crop['end']) or total_duration
+                # Always use timestamps, defaulting to 0 for start and total duration for end
+                start_seconds = timestamp_to_seconds(crop.get('start')) or 0
+                end_seconds = timestamp_to_seconds(crop.get('end')) or total_duration
                 
                 start_frame = int(start_seconds * fps)
                 end_frame = int(end_seconds * fps)
                 
-                # Add output path and frame range for each crop
                 cmd.extend([output_path, f"{start_frame}-{end_frame}"])
 
         logger.info(f"Running command: {' '.join(cmd)}")

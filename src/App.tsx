@@ -186,10 +186,9 @@ function App() {
         output_type: mode === 'manual' ? 'multiple' : 'single',
         ...(mode === 'manual' && {
           crops: timeStamps
-            .filter(pair => pair.start || pair.end) // Changed to include pairs with at least one timestamp
             .map(pair => ({
-              start: pair.start,
-              end: pair.end
+              start: pair.start || '00:00',
+              end: pair.end || videoDuration
             }))
         })
       };
