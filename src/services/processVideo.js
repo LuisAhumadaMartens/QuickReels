@@ -284,7 +284,7 @@ async function processVideo(inputPath, outputs, options = {}) {
 async function processVideo(inputPath, outputs, analysis) {
   console.log(`Processing video based on analysis: ${inputPath}`);
   
-  // Create temporary directory in current folder rather than system temp
+  // Create temporary directory in current folder
   const tempDir = path.join(process.cwd(), 'temp', `quickreels-${Date.now()}`);
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
@@ -301,6 +301,16 @@ async function processVideo(inputPath, outputs, analysis) {
     const cropWidth = Math.round(height * (9/16));
     console.log(`Original dimensions: ${width}x${height}, Crop width: ${cropWidth}`);
     
+    // Save the coordinates to a file for debugging/verification
+    const coordinatesFile = path.join(tempDir, 'coordinates.json');
+    fs.writeFileSync(coordinatesFile, JSON.stringify({
+      width,
+      height,
+      cropWidth,
+      smoothedPositions
+    }, null, 2));
+    console.log(`Saved coordinates to: ${coordinatesFile}`);
+    
     // Process each output
     const results = await Promise.all(outputs.map(async (output, index) => {
       const { url, range } = output;
@@ -315,14 +325,15 @@ async function processVideo(inputPath, outputs, analysis) {
       }
       
       // Group similar positions to reduce the number of segments
+      // Use a smaller threshold for more precise positioning
       const segments = [];
       let currentSegmentStart = 0;
       let currentPosition = smoothedPositions[0];
       
-      // Create segments with similar positions (round to nearest 0.05)
+      // Create segments with similar positions (round to nearest 0.02 - more precise)
       for (let i = 1; i < smoothedPositions.length; i++) {
-        const roundedCurrent = Math.round(currentPosition * 20) / 20;
-        const roundedNew = Math.round(smoothedPositions[i] * 20) / 20;
+        const roundedCurrent = Math.round(currentPosition * 50) / 50;
+        const roundedNew = Math.round(smoothedPositions[i] * 50) / 50;
         
         // If position changed significantly, start a new segment
         if (roundedCurrent !== roundedNew || i === smoothedPositions.length - 1) {
@@ -348,6 +359,10 @@ async function processVideo(inputPath, outputs, analysis) {
       
       console.log(`Created ${segments.length} segments with different crop positions`);
       
+      // Save segment information for debugging
+      const segmentsFile = path.join(tempDir, `segments_${index}.json`);
+      fs.writeFileSync(segmentsFile, JSON.stringify(segments, null, 2));
+      
       // Process each segment and create temporary segment files
       const segmentFiles = [];
       
@@ -356,19 +371,24 @@ async function processVideo(inputPath, outputs, analysis) {
         const segmentFile = path.join(tempDir, `segment_${index}_${i}.mp4`);
         segmentFiles.push(segmentFile);
         
-        // Calculate crop parameters for this segment
-        const xCenter = Math.round(segment.position * width);
+        // Calculate crop parameters for this segment - EXACTLY like Python
+        // Convert normalized center to pixel coordinates
+        const normCenter = segment.position;
+        const xCenter = Math.round(normCenter * width);
         let xStart = xCenter - Math.floor(cropWidth / 2);
         
         // Ensure crop stays within boundaries
-        if (xStart < 0) xStart = 0;
-        if (xStart + cropWidth > width) xStart = width - cropWidth;
+        if (xStart < 0) {
+          xStart = 0;
+        } else if (xStart + cropWidth > width) {
+          xStart = width - cropWidth;
+        }
         
         // Calculate start and end time in seconds
         const startTime = segment.startFrame / fps;
         const duration = (segment.endFrame - segment.startFrame + 1) / fps;
         
-        console.log(`Segment ${i}: frames ${segment.startFrame}-${segment.endFrame}, position ${segment.position.toFixed(3)}, crop at x=${xStart}`);
+        console.log(`Segment ${i}: frames ${segment.startFrame}-${segment.endFrame}, position ${normCenter.toFixed(4)}, center=${xCenter}, crop at x=${xStart}`);
         
         // Process this segment
         await new Promise((resolve, reject) => {
@@ -383,8 +403,17 @@ async function processVideo(inputPath, outputs, analysis) {
               '-c:a', 'aac'
             ])
             .output(segmentFile)
-            .on('end', resolve)
-            .on('error', reject)
+            .on('start', cmd => {
+              console.log(`FFmpeg command for segment ${i}: ${cmd}`);
+            })
+            .on('end', () => {
+              console.log(`Segment ${i} processed successfully`);
+              resolve();
+            })
+            .on('error', (err) => {
+              console.error(`Error processing segment ${i}:`, err);
+              reject(err);
+            })
             .run();
         });
       }
@@ -393,11 +422,14 @@ async function processVideo(inputPath, outputs, analysis) {
       if (segmentFiles.length === 1) {
         // Just rename the file if there's only one segment
         fs.copyFileSync(segmentFiles[0], outputPath);
+        console.log(`Single segment output saved to: ${outputPath}`);
       } else {
         // Create a concat file
         const concatFile = path.join(tempDir, `concat_${index}.txt`);
         const concatContent = segmentFiles.map(file => `file '${file}'`).join('\n');
         fs.writeFileSync(concatFile, concatContent);
+        
+        console.log(`Concatenating ${segmentFiles.length} segments...`);
         
         // Concatenate all segments
         await new Promise((resolve, reject) => {
@@ -408,8 +440,17 @@ async function processVideo(inputPath, outputs, analysis) {
               '-c', 'copy'
             ])
             .output(outputPath)
-            .on('end', resolve)
-            .on('error', reject)
+            .on('start', cmd => {
+              console.log(`FFmpeg concat command: ${cmd}`);
+            })
+            .on('end', () => {
+              console.log(`All segments concatenated to: ${outputPath}`);
+              resolve();
+            })
+            .on('error', (err) => {
+              console.error(`Error concatenating segments:`, err);
+              reject(err);
+            })
             .run();
         });
       }
@@ -421,28 +462,20 @@ async function processVideo(inputPath, outputs, analysis) {
       };
     }));
     
-    // Clean up temporary directory
-    try {
-      if (fs.existsSync(tempDir)) {
-        fs.rmSync(tempDir, { recursive: true });
-      }
-    } catch (err) {
-      console.warn('Warning: Failed to clean up temporary directory', err);
-    }
+    // Keep temporary files for inspection (comment out to clean up)
+    console.log(`Temporary files are saved in: ${tempDir}`);
+    // Uncomment to clean up:
+    // try {
+    //   if (fs.existsSync(tempDir)) {
+    //     fs.rmSync(tempDir, { recursive: true });
+    //   }
+    // } catch (err) {
+    //   console.warn('Warning: Failed to clean up temporary directory', err);
+    // }
     
     return results;
   } catch (error) {
     console.error('Error processing video:', error);
-    
-    // Clean up on error
-    try {
-      if (fs.existsSync(tempDir)) {
-        fs.rmSync(tempDir, { recursive: true });
-      }
-    } catch (cleanupErr) {
-      console.warn('Warning: Failed to clean up on error', cleanupErr);
-    }
-    
     throw error;
   }
 }
