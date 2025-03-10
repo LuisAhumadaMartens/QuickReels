@@ -13,7 +13,7 @@ const ASPECT_RATIO = 9 / 16;  // output crop aspect ratio
 const SCENE_CHANGE_THRESHOLD = 3000;
 
 // Define a batch size for processing frames
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 30;
 
 /**
  * MovementPlanner class - matches Python implementation
@@ -398,15 +398,21 @@ async function processVideo(inputPath, outputs, analysis) {
           
           // Process the frame with Sharp instead of spawning FFmpeg
           try {
-            await sharp(path.join(framesDir, frameFile))
+            await sharp(path.join(framesDir, frameFile), { 
+              failOnError: true
+            })
               .extract({
                 left: xStart,
                 top: 0,
                 width: cropWidth,
                 height: height
               })
-              .png() // Use PNG for highest quality
-              .toFile(path.join(processedFramesDir, frameFile));
+              // Use JPEG instead of PNG for much faster processing
+              .jpeg({ 
+                quality: 95,  // High quality but much faster than PNG
+                chromaSubsampling: '4:4:4'  // Prevent color subsampling
+              })
+              .toFile(path.join(processedFramesDir, frameFile.replace('.png', '.jpg')));
           } catch (err) {
             console.error(`Error processing frame ${frameFile}:`, err);
             throw err;
@@ -427,13 +433,13 @@ async function processVideo(inputPath, outputs, analysis) {
       // Combine processed frames back into a video - one FFmpeg call instead of per-frame
       await new Promise((resolve, reject) => {
         ffmpeg()
-          .input(path.join(processedFramesDir, 'frame-%04d.png'))
+          .input(path.join(processedFramesDir, 'frame-%04d.jpg'))
           .inputOptions(['-framerate', fps.toString()])
           .outputOptions([
             '-c:v', 'libx264',
-            '-preset', 'medium', // Keep medium preset for highest quality
-            '-crf', '23',
-            '-pix_fmt', 'yuv420p'
+            '-pix_fmt', 'yuv420p',
+            '-preset', 'ultrafast',  // Use ultrafast preset for speed
+            '-crf', '20'  // Still good quality
           ])
           .output(path.join(outputTempDir, 'video.mp4'))
           .on('end', resolve)
