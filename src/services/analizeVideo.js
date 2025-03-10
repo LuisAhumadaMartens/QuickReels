@@ -222,9 +222,6 @@ async function runInference(tensor) {
     }
     
     console.log(`Found ${detections.length} detections in frame`);
-    if (detections.length > 0 && debugMode) {
-      console.log(`  Detection 1: confidence=${detections[0].confidence.toFixed(4)}, keypoints=${detections[0].keypoints.filter(kp => kp[2] > DETECTION_THRESHOLD).length}`);
-    }
     
     return detections;
   } catch (error) {
@@ -399,7 +396,12 @@ async function analizeVideo(inputPath) {
       const inputTensor = await prepareInputTensor(imageBuffer);
       
       // Run model inference
-      const people = await runInference(inputTensor);
+      const detections = await runInference(inputTensor);
+      
+      // Format detections for clusterPeople (similar to Python implementation)
+      const people = detections.map((detection, idx) => {
+        return [idx, detection.keypoints];
+      });
       
       // Cluster people
       const clusters = clusterPeople(people);
@@ -420,7 +422,14 @@ async function analizeVideo(inputPath) {
       
       // Log progress
       if (i % 10 === 0 || i === frameFiles.length - 1) {
-        console.log(`Analyzing: ${Math.floor((i / frameFiles.length) * 100)}%`);
+        const progress = Math.floor((i / frameFiles.length) * 100);
+        console.log(`Analyzing: ${progress}%`);
+        
+        // Update progress.json similar to Python implementation
+        fs.writeFileSync('progress.json', JSON.stringify({
+          progress,
+          status: `Analyzing: ${progress}%`
+        }, null, 2));
       }
     }
     

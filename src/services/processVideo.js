@@ -5,11 +5,15 @@ const os = require('os');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const tf = require('@tensorflow/tfjs-node');
+const sharp = require('sharp');
 
 // Constants to match Python implementation
 const DEFAULT_CENTER = 0.5;  // normalized center (50%)
 const ASPECT_RATIO = 9 / 16;  // output crop aspect ratio
 const SCENE_CHANGE_THRESHOLD = 3000;
+
+// Define a batch size for processing frames
+const BATCH_SIZE = 10;
 
 /**
  * MovementPlanner class - matches Python implementation
@@ -301,15 +305,8 @@ async function processVideo(inputPath, outputs, analysis) {
     const cropWidth = Math.round(height * (9/16));
     console.log(`Original dimensions: ${width}x${height}, Crop width: ${cropWidth}`);
     
-    // Save the coordinates to a file for debugging/verification
-    const coordinatesFile = path.join(tempDir, 'coordinates.json');
-    fs.writeFileSync(coordinatesFile, JSON.stringify({
-      width,
-      height,
-      cropWidth,
-      smoothedPositions
-    }, null, 2));
-    console.log(`Saved coordinates to: ${coordinatesFile}`);
+    // Keep the smoothedPositions in memory only, similar to the Python implementation
+    // No longer saving coordinates to a file
     
     // Process each output
     const results = await Promise.all(outputs.map(async (output, index) => {
@@ -324,141 +321,164 @@ async function processVideo(inputPath, outputs, analysis) {
         fs.mkdirSync(outputDir, { recursive: true });
       }
       
-      // Group similar positions to reduce the number of segments
-      // Use a smaller threshold for more precise positioning
-      const segments = [];
-      let currentSegmentStart = 0;
-      let currentPosition = smoothedPositions[0];
+      // Create temporary directory for output
+      const outputTempDir = path.join(tempDir, `output_${index}`);
+      if (!fs.existsSync(outputTempDir)) {
+        fs.mkdirSync(outputTempDir, { recursive: true });
+      }
       
-      // Create segments with similar positions (round to nearest 0.02 - more precise)
-      for (let i = 1; i < smoothedPositions.length; i++) {
-        const roundedCurrent = Math.round(currentPosition * 50) / 50;
-        const roundedNew = Math.round(smoothedPositions[i] * 50) / 50;
+      // Process frames one by one, like the Python implementation
+      // This provides smoother camera movement instead of segmenting similar positions
+      const totalFrames = smoothedPositions.length;
+      
+      // Create directories for extracted frames and processed frames
+      const framesDir = path.join(outputTempDir, 'frames');
+      const processedFramesDir = path.join(outputTempDir, 'processed_frames');
+      
+      if (!fs.existsSync(framesDir)) {
+        fs.mkdirSync(framesDir, { recursive: true });
+      }
+      
+      if (!fs.existsSync(processedFramesDir)) {
+        fs.mkdirSync(processedFramesDir, { recursive: true });
+      }
+      
+      console.log('Processing video with frame-by-frame camera movement...');
+      console.log('Step 1: Extracting frames...');
+      
+      // Extract frames from the video - this stays the same, we extract all frames at once
+      await new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+          .outputOptions(['-vf', `fps=${fps}`])
+          // Use PNG for highest quality
+          .output(path.join(framesDir, 'frame-%04d.png'))
+          .on('end', () => {
+            console.log('Frames extracted successfully');
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error('Error extracting frames:', err);
+            reject(err);
+          })
+          .run();
+      });
+      
+      // Get list of extracted frames
+      const frameFiles = fs.readdirSync(framesDir)
+        .filter(file => file.startsWith('frame-') && file.endsWith('.png'))
+        .sort((a, b) => {
+          const numA = parseInt(a.match(/frame-(\d+)/)[1]);
+          const numB = parseInt(b.match(/frame-(\d+)/)[1]);
+          return numA - numB;
+        });
+      
+      console.log(`Found ${frameFiles.length} frames to process`);
+      console.log('Step 2: Processing frames with camera movements using Sharp...');
+      
+      // Process frames in batches to be more efficient
+      for (let batchStart = 0; batchStart < Math.min(frameFiles.length, smoothedPositions.length); batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameFiles.length, smoothedPositions.length);
+        const batch = frameFiles.slice(batchStart, batchEnd);
         
-        // If position changed significantly, start a new segment
-        if (roundedCurrent !== roundedNew || i === smoothedPositions.length - 1) {
-          segments.push({
-            startFrame: currentSegmentStart,
-            endFrame: i - 1,
-            position: currentPosition
-          });
+        // Process each batch in parallel
+        await Promise.all(batch.map(async (frameFile, idx) => {
+          const frameIndex = batchStart + idx;
+          const normCenter = smoothedPositions[frameIndex];
           
-          currentSegmentStart = i;
-          currentPosition = smoothedPositions[i];
-        }
+          // Calculate crop parameters for this frame - same logic as before
+          const xCenter = Math.floor(normCenter * width);
+          let xStart = xCenter - Math.floor(cropWidth / 2);
+          
+          // Ensure crop stays within boundaries
+          if (xStart < 0) {
+            xStart = 0;
+          } else if (xStart + cropWidth > width) {
+            xStart = width - cropWidth;
+          }
+          
+          // Process the frame with Sharp instead of spawning FFmpeg
+          try {
+            await sharp(path.join(framesDir, frameFile))
+              .extract({
+                left: xStart,
+                top: 0,
+                width: cropWidth,
+                height: height
+              })
+              .png() // Use PNG for highest quality
+              .toFile(path.join(processedFramesDir, frameFile));
+          } catch (err) {
+            console.error(`Error processing frame ${frameFile}:`, err);
+            throw err;
+          }
+        }));
+        
+        // Update progress after each batch
+        const progress = Math.floor((batchEnd / frameFiles.length) * 100);
+        console.log(`Processing frames: ${progress}%`);
+        fs.writeFileSync('progress.json', JSON.stringify({
+          progress,
+          status: `Processing frames: ${progress}%`
+        }, null, 2));
       }
       
-      // Add the last segment if needed
-      if (currentSegmentStart < smoothedPositions.length - 1) {
-        segments.push({
-          startFrame: currentSegmentStart,
-          endFrame: smoothedPositions.length - 1,
-          position: currentPosition
-        });
-      }
+      console.log('Step 3: Combining processed frames into video...');
       
-      console.log(`Created ${segments.length} segments with different crop positions`);
+      // Combine processed frames back into a video - one FFmpeg call instead of per-frame
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(path.join(processedFramesDir, 'frame-%04d.png'))
+          .inputOptions(['-framerate', fps.toString()])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-preset', 'medium', // Keep medium preset for highest quality
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p'
+          ])
+          .output(path.join(outputTempDir, 'video.mp4'))
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
       
-      // Save segment information for debugging
-      const segmentsFile = path.join(tempDir, `segments_${index}.json`);
-      fs.writeFileSync(segmentsFile, JSON.stringify(segments, null, 2));
+      console.log('Step 4: Adding audio from original video...');
       
-      // Process each segment and create temporary segment files
-      const segmentFiles = [];
+      // Add audio from the original video - this stays the same
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(path.join(outputTempDir, 'video.mp4'))
+          .input(inputPath)
+          .outputOptions([
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-map', '0:v:0',
+            '-map', '1:a:0?'
+          ])
+          .output(outputPath)
+          .on('end', () => {
+            console.log(`Processing complete: ${outputPath}`);
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error(`Error adding audio:`, err);
+            reject(err);
+          })
+          .run();
+      });
       
-      for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        const segmentFile = path.join(tempDir, `segment_${index}_${i}.mp4`);
-        segmentFiles.push(segmentFile);
-        
-        // Calculate crop parameters for this segment - EXACTLY like Python
-        // Convert normalized center to pixel coordinates
-        const normCenter = segment.position;
-        const xCenter = Math.round(normCenter * width);
-        let xStart = xCenter - Math.floor(cropWidth / 2);
-        
-        // Ensure crop stays within boundaries
-        if (xStart < 0) {
-          xStart = 0;
-        } else if (xStart + cropWidth > width) {
-          xStart = width - cropWidth;
-        }
-        
-        // Calculate start and end time in seconds
-        const startTime = segment.startFrame / fps;
-        const duration = (segment.endFrame - segment.startFrame + 1) / fps;
-        
-        console.log(`Segment ${i}: frames ${segment.startFrame}-${segment.endFrame}, position ${normCenter.toFixed(4)}, center=${xCenter}, crop at x=${xStart}`);
-        
-        // Process this segment
-        await new Promise((resolve, reject) => {
-          ffmpeg(inputPath)
-            .setStartTime(startTime)
-            .setDuration(duration)
-            .outputOptions([
-              '-filter:v', `crop=${cropWidth}:${height}:${xStart}:0`,
-              '-c:v', 'libx264',
-              '-preset', 'medium',
-              '-crf', '23',
-              '-c:a', 'aac'
-            ])
-            .output(segmentFile)
-            .on('start', cmd => {
-              console.log(`FFmpeg command for segment ${i}: ${cmd}`);
-            })
-            .on('end', () => {
-              console.log(`Segment ${i} processed successfully`);
-              resolve();
-            })
-            .on('error', (err) => {
-              console.error(`Error processing segment ${i}:`, err);
-              reject(err);
-            })
-            .run();
-        });
-      }
-      
-      // Now concatenate all segments
-      if (segmentFiles.length === 1) {
-        // Just rename the file if there's only one segment
-        fs.copyFileSync(segmentFiles[0], outputPath);
-        console.log(`Single segment output saved to: ${outputPath}`);
-      } else {
-        // Create a concat file
-        const concatFile = path.join(tempDir, `concat_${index}.txt`);
-        const concatContent = segmentFiles.map(file => `file '${file}'`).join('\n');
-        fs.writeFileSync(concatFile, concatContent);
-        
-        console.log(`Concatenating ${segmentFiles.length} segments...`);
-        
-        // Concatenate all segments
-        await new Promise((resolve, reject) => {
-          ffmpeg()
-            .input(concatFile)
-            .inputOptions(['-f', 'concat', '-safe', '0'])
-            .outputOptions([
-              '-c', 'copy'
-            ])
-            .output(outputPath)
-            .on('start', cmd => {
-              console.log(`FFmpeg concat command: ${cmd}`);
-            })
-            .on('end', () => {
-              console.log(`All segments concatenated to: ${outputPath}`);
-              resolve();
-            })
-            .on('error', (err) => {
-              console.error(`Error concatenating segments:`, err);
-              reject(err);
-            })
-            .run();
-        });
+      // Clean up temporary files to save space
+      try {
+        fs.rmSync(framesDir, { recursive: true, force: true });
+        fs.rmSync(processedFramesDir, { recursive: true, force: true });
+        fs.unlinkSync(path.join(outputTempDir, 'video.mp4'));
+      } catch (err) {
+        console.warn('Warning: Could not clean up some temporary files', err);
       }
       
       return {
-        outputPath: url,
-        range: range,
-        status: 'completed'
+        outputPath,
+        status: 'completed',
+        frames: frameFiles.length
       };
     }));
     
