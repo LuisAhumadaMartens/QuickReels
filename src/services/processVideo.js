@@ -5,7 +5,8 @@ const os = require('os');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const tf = require('@tensorflow/tfjs-node');
-const sharp = require('sharp');
+const cv = require('@u4/opencv4nodejs');
+// const sharp = require('sharp');
 
 // Constants to match Python implementation
 const DEFAULT_CENTER = 0.5;  // normalized center (50%)
@@ -13,7 +14,23 @@ const ASPECT_RATIO = 9 / 16;  // output crop aspect ratio
 const SCENE_CHANGE_THRESHOLD = 3000;
 
 // Define a batch size for processing frames
-const BATCH_SIZE = 30;
+const BATCH_SIZE = 10;
+
+/**
+ * Calculate Mean Squared Error between two images
+ * Matches the Python implementation for consistency
+ */
+function mse(imageA, imageB) {
+  const diff = new cv.Mat();
+  cv.absdiff(imageA, imageB, diff);
+  cv.multiply(diff, diff, diff);
+  
+  const meanValue = diff.mean();
+  diff.release();
+  
+  // Calculate the MSE similar to the Python version
+  return meanValue.reduce((a, b) => a + b, 0) / meanValue.length;
+}
 
 /**
  * MovementPlanner class - matches Python implementation
@@ -373,7 +390,10 @@ async function processVideo(inputPath, outputs, analysis) {
         });
       
       console.log(`Found ${frameFiles.length} frames to process`);
-      console.log('Step 2: Processing frames with camera movements using Sharp...');
+      console.log('Step 2: Processing frames with camera movements using OpenCV...');
+      
+      // For scene change detection
+      let prevGrayFrame = null;
       
       // Process frames in batches to be more efficient
       for (let batchStart = 0; batchStart < Math.min(frameFiles.length, smoothedPositions.length); batchStart += BATCH_SIZE) {
@@ -396,23 +416,50 @@ async function processVideo(inputPath, outputs, analysis) {
             xStart = width - cropWidth;
           }
           
-          // Process the frame with Sharp instead of spawning FFmpeg
+          // Process the frame with OpenCV instead of spawning FFmpeg
           try {
-            await sharp(path.join(framesDir, frameFile), { 
-              failOnError: true
-            })
-              .extract({
-                left: xStart,
-                top: 0,
-                width: cropWidth,
-                height: height
-              })
-              // Use JPEG instead of PNG for much faster processing
-              .jpeg({ 
-                quality: 95,  // High quality but much faster than PNG
-                chromaSubsampling: '4:4:4'  // Prevent color subsampling
-              })
-              .toFile(path.join(processedFramesDir, frameFile.replace('.png', '.jpg')));
+            const frameMat = cv.imread(path.join(framesDir, frameFile), cv.IMREAD_COLOR);
+            
+            // Convert to grayscale for scene change detection
+            const grayFrame = frameMat.cvtColor(cv.COLOR_BGR2GRAY);
+            
+            // Calculate frame difference if we have a previous frame
+            let frameDiff = 0;
+            if (frameIndex > 0 && prevGrayFrame) {
+              frameDiff = mse(grayFrame, prevGrayFrame);
+              
+              // Log scene changes for debugging
+              if (frameDiff > SCENE_CHANGE_THRESHOLD) {
+                console.log(`Scene change detected at frame ${frameIndex} with diff ${frameDiff.toFixed(2)}`);
+              }
+            }
+            
+            // Store grayscale frame for next comparison
+            if (frameIndex === 0 || (frameIndex % BATCH_SIZE === BATCH_SIZE - 1)) {
+              prevGrayFrame = grayFrame;
+            } else {
+              grayFrame.release();
+            }
+            
+            const croppedFrameMat = frameMat.getRegion(new cv.Rect(xStart, 0, cropWidth, height));
+            
+            // Check if we need to resize the output (if output dimensions are different from crop)
+            const outputWidth = options.outputWidth || cropWidth;
+            const outputHeight = options.outputHeight || height;
+            
+            if (outputWidth !== cropWidth || outputHeight !== height) {
+              // Use INTER_LINEAR for better performance/quality balance (same as Python)
+              const resizedMat = croppedFrameMat.resize(outputHeight, outputWidth, 0, 0, cv.INTER_LINEAR);
+              cv.imwrite(path.join(processedFramesDir, frameFile), resizedMat);
+              // Release memory
+              resizedMat.release();
+            } else {
+              cv.imwrite(path.join(processedFramesDir, frameFile), croppedFrameMat);
+            }
+            
+            // Release memory
+            croppedFrameMat.release();
+            frameMat.release();
           } catch (err) {
             console.error(`Error processing frame ${frameFile}:`, err);
             throw err;
@@ -433,13 +480,11 @@ async function processVideo(inputPath, outputs, analysis) {
       // Combine processed frames back into a video - one FFmpeg call instead of per-frame
       await new Promise((resolve, reject) => {
         ffmpeg()
-          .input(path.join(processedFramesDir, 'frame-%04d.jpg'))
+          .input(path.join(processedFramesDir, 'frame-%04d.png'))
           .inputOptions(['-framerate', fps.toString()])
           .outputOptions([
             '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',
-            '-preset', 'ultrafast',  // Use ultrafast preset for speed
-            '-crf', '20'  // Still good quality
+            '-pix_fmt', 'yuv420p'
           ])
           .output(path.join(outputTempDir, 'video.mp4'))
           .on('end', resolve)
