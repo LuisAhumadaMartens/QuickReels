@@ -284,41 +284,24 @@ async function processVideo(inputPath, outputs, options = {}) {
 async function processVideo(inputPath, outputs, analysis) {
   console.log(`Processing video based on analysis: ${inputPath}`);
   
-  // Create temporary directory for processing
-  const tempDir = path.join(os.tmpdir(), `quickreels-proc-${Date.now()}`);
+  // Create temporary directory in current folder rather than system temp
+  const tempDir = path.join(process.cwd(), 'temp', `quickreels-${Date.now()}`);
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
   
+  console.log(`Using temporary directory: ${tempDir}`);
+  
   try {
     // Extract metadata and positions from analysis
-    const { metadata, sceneChanges, frameDiffs, smoothedPositions } = analysis;
+    const { metadata, smoothedPositions } = analysis;
     const { width, height, fps } = metadata;
     
     // Calculate crop dimensions for 9:16 aspect ratio
-    const cropWidth = Math.round(height * ASPECT_RATIO);
+    const cropWidth = Math.round(height * (9/16));
     console.log(`Original dimensions: ${width}x${height}, Crop width: ${cropWidth}`);
     
-    // Create the movement planner and apply advanced smoothing
-    const planner = new MovementPlanner(fps);
-    
-    // Use the analysis data to populate the planner's frame data
-    // This simulates the first pass that was done in analizeVideo
-    for (let i = 0; i < smoothedPositions.length; i++) {
-      const isSceneChange = sceneChanges.includes(i);
-      const framePosition = smoothedPositions[i];
-      planner.frameData.push([i, framePosition, isSceneChange]);
-      
-      // Also set scene start for any scene changes
-      if (isSceneChange) {
-        planner.currentSceneStart = i;
-      }
-    }
-    
-    // Apply the Python-style smoothing algorithm to get final positions
-    const finalSmoothedPositions = planner.interpolateAndSmooth(smoothedPositions.length);
-    
-    // Now process each output with the smoothed positions
+    // Process each output
     const results = await Promise.all(outputs.map(async (output, index) => {
       const { url, range } = output;
       const outputPath = url;
@@ -331,64 +314,105 @@ async function processVideo(inputPath, outputs, analysis) {
         fs.mkdirSync(outputDir, { recursive: true });
       }
       
-      // Create a filter complex for precise frame-by-frame cropping
-      // We'll use the 'zoompan' filter which can handle dynamic positioning
-      const filterComplex = [];
+      // Group similar positions to reduce the number of segments
+      const segments = [];
+      let currentSegmentStart = 0;
+      let currentPosition = smoothedPositions[0];
       
-      // First create a position file for sendcmd filter
-      const positionsFile = path.join(tempDir, `positions_${index}.txt`);
-      let positionCommands = '';
-      
-      for (let i = 0; i < finalSmoothedPositions.length; i++) {
-        // Get normalized center (0.0-1.0)
-        const normCenter = finalSmoothedPositions[i];
+      // Create segments with similar positions (round to nearest 0.05)
+      for (let i = 1; i < smoothedPositions.length; i++) {
+        const roundedCurrent = Math.round(currentPosition * 20) / 20;
+        const roundedNew = Math.round(smoothedPositions[i] * 20) / 20;
         
-        // Calculate crop area in pixels
-        const xCenter = Math.round(normCenter * width);
+        // If position changed significantly, start a new segment
+        if (roundedCurrent !== roundedNew || i === smoothedPositions.length - 1) {
+          segments.push({
+            startFrame: currentSegmentStart,
+            endFrame: i - 1,
+            position: currentPosition
+          });
+          
+          currentSegmentStart = i;
+          currentPosition = smoothedPositions[i];
+        }
+      }
+      
+      // Add the last segment if needed
+      if (currentSegmentStart < smoothedPositions.length - 1) {
+        segments.push({
+          startFrame: currentSegmentStart,
+          endFrame: smoothedPositions.length - 1,
+          position: currentPosition
+        });
+      }
+      
+      console.log(`Created ${segments.length} segments with different crop positions`);
+      
+      // Process each segment and create temporary segment files
+      const segmentFiles = [];
+      
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        const segmentFile = path.join(tempDir, `segment_${index}_${i}.mp4`);
+        segmentFiles.push(segmentFile);
+        
+        // Calculate crop parameters for this segment
+        const xCenter = Math.round(segment.position * width);
         let xStart = xCenter - Math.floor(cropWidth / 2);
         
         // Ensure crop stays within boundaries
         if (xStart < 0) xStart = 0;
         if (xStart + cropWidth > width) xStart = width - cropWidth;
         
-        // Format for sendcmd: timestamp crop=w:h:x:y
-        const timestamp = i / fps;
-        positionCommands += `${timestamp.toFixed(3)} crop=${cropWidth}:${height}:${xStart}:0\n`;
+        // Calculate start and end time in seconds
+        const startTime = segment.startFrame / fps;
+        const duration = (segment.endFrame - segment.startFrame + 1) / fps;
+        
+        console.log(`Segment ${i}: frames ${segment.startFrame}-${segment.endFrame}, position ${segment.position.toFixed(3)}, crop at x=${xStart}`);
+        
+        // Process this segment
+        await new Promise((resolve, reject) => {
+          ffmpeg(inputPath)
+            .setStartTime(startTime)
+            .setDuration(duration)
+            .outputOptions([
+              '-filter:v', `crop=${cropWidth}:${height}:${xStart}:0`,
+              '-c:v', 'libx264',
+              '-preset', 'medium',
+              '-crf', '23',
+              '-c:a', 'aac'
+            ])
+            .output(segmentFile)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        });
       }
       
-      // Write position commands to file
-      fs.writeFileSync(positionsFile, positionCommands);
-      
-      // Create the ffmpeg command
-      const ffmpegCommand = ffmpeg(inputPath)
-        .outputOptions([
-          '-filter_complex', `sendcmd=f='${positionsFile}',crop=${cropWidth}:${height}:${Math.floor(width/2 - cropWidth/2)}:0`,
-          '-c:v', 'libx264',
-          '-preset', 'medium',
-          '-crf', '23',
-          '-c:a', 'aac'
-        ])
-        .output(outputPath)
-        .on('start', cmd => {
-          console.log(`FFmpeg command: ${cmd.substring(0, 200)}... [truncated]`);
-        })
-        .on('progress', progress => {
-          console.log(`Processing ${output.url}: ${Math.floor(progress.percent || 0)}% done`);
+      // Now concatenate all segments
+      if (segmentFiles.length === 1) {
+        // Just rename the file if there's only one segment
+        fs.copyFileSync(segmentFiles[0], outputPath);
+      } else {
+        // Create a concat file
+        const concatFile = path.join(tempDir, `concat_${index}.txt`);
+        const concatContent = segmentFiles.map(file => `file '${file}'`).join('\n');
+        fs.writeFileSync(concatFile, concatContent);
+        
+        // Concatenate all segments
+        await new Promise((resolve, reject) => {
+          ffmpeg()
+            .input(concatFile)
+            .inputOptions(['-f', 'concat', '-safe', '0'])
+            .outputOptions([
+              '-c', 'copy'
+            ])
+            .output(outputPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
         });
-      
-      // Process the video
-      await new Promise((resolve, reject) => {
-        ffmpegCommand
-          .on('end', () => {
-            console.log(`Successfully processed: ${outputPath}`);
-            resolve();
-          })
-          .on('error', (err) => {
-            console.error(`Error processing ${outputPath}:`, err);
-            reject(err);
-          })
-          .run();
-      });
+      }
       
       return {
         outputPath: url,
@@ -399,7 +423,9 @@ async function processVideo(inputPath, outputs, analysis) {
     
     // Clean up temporary directory
     try {
-      fs.rmSync(tempDir, { recursive: true });
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true });
+      }
     } catch (err) {
       console.warn('Warning: Failed to clean up temporary directory', err);
     }

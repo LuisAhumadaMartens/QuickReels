@@ -292,8 +292,9 @@ function formatTimecode(seconds) {
 }
 
 /**
- * Analyze video frames for content detection
- * Implementation based on tensorflow-test-cli.js but structure matching toReel.py
+ * Analyze video and extract camera tracking data
+ * @param {string} inputPath - Path to input video
+ * @returns {Object} - Analysis results
  */
 async function analizeVideo(inputPath) {
   console.log(`Analyzing video: ${inputPath}`);
@@ -302,11 +303,13 @@ async function analizeVideo(inputPath) {
     // Initialize TensorFlow and load model
     await initializeTensorFlow();
     
-    // Create temporary directory for processing
-    const tempDir = path.join(os.tmpdir(), `quickreels-${Date.now()}`);
+    // Create temporary directory in current folder
+    const tempDir = path.join(process.cwd(), 'temp', `quickreels-analysis-${Date.now()}`);
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
+    
+    console.log(`Using temporary directory: ${tempDir}`);
     
     // Extract video metadata
     const metadata = await new Promise((resolve, reject) => {
