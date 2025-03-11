@@ -21,6 +21,11 @@
     "temp": "^0.9.4"
   },
   "config": {
-    "port": 3000
+    "port": 3000,
+    "detectionThreshold": 0.3,
+    "personClassId": 0,
+    "sceneChangeThreshold": 3000,
+    "defaultCenter": 0.5,
+    "moveNetInputSize": 192
   }
 }

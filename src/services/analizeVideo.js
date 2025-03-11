@@ -8,6 +8,7 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const EventEmitter = require('events');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
+const config = require('../config/config');
 
 // Set the ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -19,12 +20,8 @@ const eventEmitter = new EventEmitter();
 let model = null;
 const MODEL_PATH = path.join(__dirname, '../../model');
 
-// Detection thresholds - matching toReel.py values
-const DETECTION_THRESHOLD = 0.3;
-const PERSON_CLASS_ID = 0; // In COCO dataset, person is class 0
-const SCENE_CHANGE_THRESHOLD = 3000; // Same as toReel.py
-const DEFAULT_CENTER = 0.5; // Normalized center position (50%)
-const MOVE_NET_INPUT_SIZE = [192, 192];
+// Get detection thresholds from config
+const { DETECTION_THRESHOLD, PERSON_CLASS_ID, SCENE_CHANGE_THRESHOLD, DEFAULT_CENTER, MOVE_NET_INPUT_SIZE } = config;
 
 /**
  * Register event listener for frame processing
