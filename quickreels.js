@@ -11,7 +11,7 @@ const config = require('./src/config/config');
 const portManager = require('./src/services/portManager');
 const apiRoutes = require('./src/routes/api');
 const { analizeVideo } = require('./src/services/analizeVideo');
-const { processVideo } = require('./src/services/processVideo');
+const { processVideo, generateRandomId, updateProgress } = require('./src/services/processVideo');
 
 
 // ------------------------------------------------------------
@@ -60,31 +60,141 @@ app.get('/health', (req, res) => {
 // Path Check
 app.post('/process-reel', async (req, res) => {
   try {
-    const { input, outputs } = req.body;
+    // Support both 'output' and 'outputs' for backward compatibility
+    const { input, output, outputs } = req.body;
+    const outputPath = output || (outputs && typeof outputs === 'string' ? outputs : null);
+    
+    // Generate a unique job ID
+    const jobId = generateRandomId();
     
     // Validate inputs
-    if (!input || !(await isUrlValid(input)))
+    if (!input || !(await isUrlValid(input, true)))
       return sendErrorResponse(res, 400, 'Invalid input URL', 'INVALID_INPUT_URL');
-    if (!outputs || !Array.isArray(outputs) || outputs.length === 0)
-      return sendErrorResponse(res, 400, 'Invalid outputs configuration', 'INVALID_OUTPUTS');
-
     
-    // Validate each output URL
-    for (const output of outputs) {
-      if (!output.url || !(await isUrlValid(output.url))) { // Ahora se usa nomas el path para crear el archivo, idealmente usar el URL para saber donde mandar el archivo.
-        return sendErrorResponse(res, 400, 'Invalid output URL', 'INVALID_OUTPUT_URL');
-      }
+    if (!outputPath || !(await isUrlValid(outputPath, false))) {
+      return sendErrorResponse(res, 400, 'Invalid output path', 'INVALID_OUTPUT_PATH');
     }
     
-    // Process the video
-    console.log(`Processing reel from: ${input}`);
-    const analysis = await analizeVideo(input);
-    const results = await processVideo(input, outputs, analysis);
+    // Initialize progress tracking with the new structure
+    updateProgress(jobId, {
+      analysis: { progress: 0, status: "Starting video analysis..." },
+      processing: { progress: 0, status: "Waiting for analysis to complete" },
+      videoGenerated: false
+    });
     
-    return sendSuccessResponse(res, { results });
+    // Process the video
+    console.log(`Processing reel job ${jobId} from: ${input} to: ${outputPath}`);
+    
+    // Start processing in the background
+    (async () => {
+      try {
+        // Update analysis progress
+        updateProgress(jobId, {
+          analysis: { progress: 20, status: "Analyzing video..." }
+        });
+        
+        const analysis = await analizeVideo(input);
+        
+        // Mark analysis as complete
+        updateProgress(jobId, {
+          analysis: { progress: 100, status: "Analysis complete" }
+        });
+        
+        const result = await processVideo(input, outputPath, analysis, jobId);
+        console.log(`Processing completed for job ${jobId}:`, result);
+      } catch (error) {
+        console.error(`Error processing job ${jobId}:`, error);
+        
+        // Determine which stage had the error
+        if (error.message.includes('analiz') || error.message.includes('analys')) {
+          updateProgress(jobId, {
+            analysis: { progress: -1, status: `Error: ${error.message}` }
+          });
+        } else {
+          updateProgress(jobId, {
+            processing: { progress: -1, status: `Error: ${error.message}` }
+          });
+        }
+      }
+    })();
+    
+    // Return immediately with the job ID
+    return sendSuccessResponse(res, { 
+      jobId,
+      message: 'Video processing started',
+      input,
+      output: outputPath 
+    });
   } catch (error) {
-    console.error('Error processing video:', error);
-    return sendErrorResponse(res, 500, `Error processing video: ${error.message}`, 'PROCESSING_ERROR');
+    console.error('Error initializing video processing:', error);
+    return sendErrorResponse(res, 500, `Error initializing video processing: ${error.message}`, 'PROCESSING_ERROR');
+  }
+});
+
+// Add endpoint to check processing status
+app.get('/status/:jobId', (req, res) => {
+  try {
+    const { jobId } = req.params;
+    
+    if (!jobId) {
+      return sendErrorResponse(res, 400, 'Job ID is required', 'MISSING_JOB_ID');
+    }
+    
+    // Read progress.json to get the status
+    if (!fs.existsSync('progress.json')) {
+      return sendErrorResponse(res, 404, 'No active jobs found', 'NO_JOBS_FOUND');
+    }
+    
+    const progressData = JSON.parse(fs.readFileSync('progress.json', 'utf-8'));
+    
+    // Check if this job exists in the progress data
+    if (!progressData[jobId]) {
+      return sendErrorResponse(res, 404, `Job ${jobId} not found or completed`, 'JOB_NOT_FOUND');
+    }
+    
+    const jobStatus = progressData[jobId];
+    
+    // Calculate overall progress (weighted: 30% analysis, 70% processing)
+    const analysisProgress = jobStatus.analysis?.progress || 0;
+    const processingProgress = jobStatus.processing?.progress || 0;
+    const overallProgress = Math.round(
+      (analysisProgress * 0.3) + (processingProgress * 0.7)
+    );
+    
+    // Determine current phase
+    let currentPhase = "initializing";
+    let currentStatus = "Starting...";
+    
+    if (jobStatus.videoGenerated) {
+      currentPhase = "complete";
+      currentStatus = "Video generation complete";
+    } else if (analysisProgress === 100) {
+      if (processingProgress === -1) {
+        currentPhase = "error";
+        currentStatus = jobStatus.processing?.status || "Error in processing";
+      } else {
+        currentPhase = "processing";
+        currentStatus = jobStatus.processing?.status || "Processing video";
+      }
+    } else if (analysisProgress > 0 && analysisProgress < 100) {
+      currentPhase = "analyzing";
+      currentStatus = jobStatus.analysis?.status || "Analyzing video";
+    } else if (analysisProgress === -1) {
+      currentPhase = "error";
+      currentStatus = jobStatus.analysis?.status || "Error in analysis";
+    }
+    
+    // Return the job status with additional info
+    return sendSuccessResponse(res, {
+      jobId,
+      currentPhase,
+      currentStatus,
+      overallProgress,
+      ...jobStatus
+    });
+  } catch (error) {
+    console.error('Error checking job status:', error);
+    return sendErrorResponse(res, 500, `Error checking job status: ${error.message}`, 'STATUS_CHECK_ERROR');
   }
 });
 
@@ -131,9 +241,10 @@ const startServer = async () => {
 /**
  * Validates if a string is a valid URL (http, https, or file)
  * @param {string} urlString - The URL to validate
+ * @param {boolean} isInput - True if this is an input path, false for output path
  * @returns {Promise<boolean>} - True if URL is valid, false otherwise
  */
-async function isUrlValid(urlString) {
+async function isUrlValid(urlString, isInput = true) {
   return new Promise((resolve) => {
     try {
       if (!urlString || typeof urlString !== 'string') {
@@ -143,8 +254,29 @@ async function isUrlValid(urlString) {
       
       // For file paths (non-URLs)
       if ((urlString.startsWith('/') || urlString.includes(':\\')) && !urlString.startsWith('file://')) {
-        resolve(fs.existsSync(urlString));
-        return;
+        if (isInput) {
+          // For input paths, the file must exist
+          resolve(fs.existsSync(urlString));
+          return;
+        } else {
+          // For output paths, we just need write permission to the directory
+          try {
+            const dirPath = path.dirname(urlString);
+            fs.mkdirSync(dirPath, { recursive: true });
+            
+            // Check if we can write to the directory
+            const testFile = path.join(dirPath, `.quickreels_write_test_${Date.now()}`);
+            fs.writeFileSync(testFile, 'test');
+            fs.unlinkSync(testFile);
+            
+            resolve(true);
+            return;
+          } catch (err) {
+            console.warn(`Cannot write to directory for output: ${err.message}`);
+            resolve(false);
+            return;
+          }
+        }
       }
       
       // Validate URL format
@@ -160,29 +292,57 @@ async function isUrlValid(urlString) {
             host: parsedUrl.hostname,
             path: parsedUrl.pathname + parsedUrl.search
           }, (res) => {
-            // Accept 2xx and 3xx status codes
-            resolve(res.statusCode >= 200 && res.statusCode < 400); // Asumiendo que eso queremos. Revisar si es necesario.
+            // Accept 2xx and 3xx status codes for inputs
+            // For outputs, we don't need to check the status
+            if (isInput) {
+              resolve(res.statusCode >= 200 && res.statusCode < 400);
+            } else {
+              // For outputs, we assume we can write to any URL
+              resolve(true);
+            }
           });
           
           req.on('error', () => {
-            resolve(false);
+            if (isInput) {
+              resolve(false);
+            } else {
+              // For outputs, still assume we can write to any URL even if HEAD fails
+              resolve(true);
+            }
           });
           
           req.setTimeout(5000, () => {
             req.destroy();
-            resolve(false);
+            if (isInput) {
+              resolve(false);
+            } else {
+              // For outputs, still assume we can write to any URL even if timeout
+              resolve(true);
+            }
           });
           
           req.end();
         } else if (parsedUrl.protocol === 'file:') {
-          // For file URLs, validate we have write permissions to the directory
+          // For file URLs with file:// protocol
           const filePath = parsedUrl.pathname;
           const dirPath = path.dirname(filePath);
-          try {
-            fs.accessSync(dirPath, fs.constants.W_OK);
-            resolve(true);
-          } catch {
-            resolve(false);
+          
+          if (isInput) {
+            try {
+              // Check if file exists and is readable
+              fs.accessSync(filePath, fs.constants.R_OK);
+              resolve(true);
+            } catch {
+              resolve(false);
+            }
+          } else {
+            try {
+              // For output, ensure directory exists and is writable
+              fs.mkdirSync(dirPath, { recursive: true });
+              resolve(true);
+            } catch {
+              resolve(false);
+            }
           }
         } else {
           resolve(false);
@@ -218,37 +378,26 @@ if (require.main === module) {
 /*
 Example JSON Payload:
 {
-  "input": "http://example.com/input.mp4",
-  "outputs": [
-    {
-      "url": "http://example.com/output1.mp4",
-      "range": "[123-834]"
-    },
-    {
-      "url": "http://example.com/output2.mp4"
-    }
-  ]
+  "input": "/path/address/origin/video.mp4",
+  "output": "/path/to/send/output.mp4"
 }
+
+Both "output" and "outputs" fields are supported for backward compatibility.
 
 curl -X POST http://localhost:3000/process-reel \
   -H "Content-Type: application/json" \
   -d '{
         "input": "/Users/luis/Desktop/Demo QuickReels/office.mp4",
-        "outputs": [
-          {
-            "url": "/Users/luis/Downloads/outputs/output2.mp4"
-          }
-        ]
+        "output": "/Users/luis/Downloads/outputs/output2.mp4"
+      }'
+
+or
+
+curl -X POST http://localhost:3000/process-reel \
+  -H "Content-Type: application/json" \
+  -d '{
+        "input": "/Users/luis/Desktop/Demo QuickReels/office.mp4",
+        "outputs": "/Users/luis/Downloads/outputs/output2.mp4"
       }'
       
-*/
-
-/*
-
-Hay varios cambios que es que hacer dependiendo como funcionara.
-
-Validamos URL porque debemos descargar el video en el directorio, de ahi procesarlo.
-El URL de output podria ser donde lo guardaremos. Asi que seria que aisgnar un espacio temporal en el directorio tambien, y de ahi entregarlo a esa URL.
-Pero mientras el script usa ambas para asi probar en local.
-
 */

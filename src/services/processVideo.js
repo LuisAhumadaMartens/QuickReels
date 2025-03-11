@@ -6,6 +6,7 @@ const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const tf = require('@tensorflow/tfjs-node');
 const cv = require('@u4/opencv4nodejs');
+const crypto = require('crypto');
 // const sharp = require('sharp');
 
 // Constants to match Python implementation
@@ -15,6 +16,17 @@ const SCENE_CHANGE_THRESHOLD = 3000;
 
 // Define a batch size for processing frames
 const BATCH_SIZE = 10;
+
+/**
+ * Generate a random alphanumeric ID
+ * @param {number} length - Length of the ID
+ * @returns {string} - Random alphanumeric ID
+ */
+function generateRandomId(length = 10) {
+  return crypto.randomBytes(Math.ceil(length / 2))
+    .toString('hex')
+    .slice(0, length);
+}
 
 /**
  * Calculate Mean Squared Error between two images
@@ -332,365 +344,381 @@ class MovementPlanner {
 }
 
 /**
- * Process a video file with specified outputs
- * @param {string} inputPath - Path to the input video file
- * @param {Array} outputs - Array of output configurations
- * @param {Object} options - Additional processing options
- * @returns {Promise<Object>} - Processing results
+ * Update the progress tracking file with job status
+ * @param {string} jobId - The job ID
+ * @param {Object} statusUpdate - The status update object
+ * @param {Object} [statusUpdate.analysis] - Analysis status update
+ * @param {number} [statusUpdate.analysis.progress] - Analysis progress (0-100)
+ * @param {string} [statusUpdate.analysis.status] - Analysis status message
+ * @param {Object} [statusUpdate.processing] - Processing status update
+ * @param {number} [statusUpdate.processing.progress] - Processing progress (0-100)
+ * @param {string} [statusUpdate.processing.status] - Processing status message
+ * @param {boolean} [statusUpdate.videoGenerated] - Whether the video has been generated
  */
-async function processVideo(inputPath, outputs, options = {}) {
-  console.log(`Starting video processing for: ${inputPath}`);
-  console.log('Processing options:', options);
-  
+function updateProgress(jobId, statusUpdate) {
   try {
-    // Step 1: Convert outputs to VideoSegment objects
-    console.log('Step 1: Preparing segments...');
-    const segments = outputs.map(output => {
-      const { url, range, debug } = output;
-      
-      // Parse frame range if provided
-      let startFrame = null;
-      let endFrame = null;
-      
-      if (range) {
+    // Read existing progress data
+    let progressData = {};
+    if (fs.existsSync('progress.json')) {
+      progressData = JSON.parse(fs.readFileSync('progress.json', 'utf-8'));
+    }
+    
+    // Initialize job entry if it doesn't exist
+    if (!progressData[jobId]) {
+      progressData[jobId] = {
+        analysis: { progress: 0, status: "Not started" },
+        processing: { progress: 0, status: "Not started" },
+        videoGenerated: false
+      };
+    }
+    
+    // Update job data with the provided updates
+    if (statusUpdate.analysis) {
+      progressData[jobId].analysis = {
+        ...progressData[jobId].analysis,
+        ...statusUpdate.analysis
+      };
+    }
+    
+    if (statusUpdate.processing) {
+      progressData[jobId].processing = {
+        ...progressData[jobId].processing,
+        ...statusUpdate.processing
+      };
+    }
+    
+    if (statusUpdate.videoGenerated !== undefined) {
+      progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
+    }
+    
+    // If video is generated or there's an error, schedule removal
+    if (statusUpdate.videoGenerated === true || 
+        (statusUpdate.processing && statusUpdate.processing.status && statusUpdate.processing.status.startsWith("Error"))) {
+      // Wait a bit before deleting to ensure clients can read final status
+      setTimeout(() => {
         try {
-          const parsedRange = parseFrameRange(range);
-          startFrame = parsedRange.startFrame;
-          endFrame = parsedRange.endFrame;
-        } catch (error) {
-          console.warn(`Warning: Invalid range format: ${range}. Using full video.`);
+          if (fs.existsSync('progress.json')) {
+            let currentData = JSON.parse(fs.readFileSync('progress.json', 'utf-8'));
+            delete currentData[jobId];
+            fs.writeFileSync('progress.json', JSON.stringify(currentData, null, 2));
+            console.log(`Removed completed job ${jobId} from progress tracking`);
+          }
+        } catch (err) {
+          console.warn(`Warning: Could not remove job ${jobId} from progress tracking:`, err);
         }
-      }
-      
-      // Use segment-specific debug flag or global debug flag from options
-      const debugMode = debug === true || options.debug === true;
-      
-      return new VideoSegment(url, startFrame, endFrame, debugMode);
-    });
+      }, 30000); // Wait 30 seconds before removing
+    }
     
-    // Step 2: Create video processor
-    console.log('Step 2: Creating video processor...');
-    const processor = new VideoProcessor(inputPath, segments);
-    
-    // Step 3: Process the video
-    console.log('Step 3: Processing video...');
-    const processingResults = await processor.processAll();
-    
-    // Step 4: Format the results
-    console.log('Step 4: Compiling results...');
-    const result = {
-      input: inputPath,
-      outputs: processingResults.segments.map(segment => ({
-        outputPath: segment.outputPath,
-        range: segment.startFrame && segment.endFrame ? 
-          `[${segment.startFrame}-${segment.endFrame}]` : 'full video',
-        duration: segment.duration,
-        status: 'completed'
-      })),
-      analysis: {
-        duration: processingResults.duration,
-        totalFrames: processingResults.totalFrames,
-        fps: processingResults.fps
-      },
-      status: 'completed',
-      timestamp: new Date().toISOString()
-    };
-    
-    console.log('Video processing completed successfully');
-    return result;
-  } catch (error) {
-    console.error('Error processing video:', error);
-    throw new Error(`Video processing failed: ${error.message}`);
+    // Write updated progress data
+    fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+  } catch (err) {
+    console.warn(`Warning: Could not update progress for job ${jobId}:`, err);
   }
 }
 
 /**
- * Process video based on analysis results
+ * Process a video based on analysis results
  * @param {string} inputPath - Path to the input video file
- * @param {Array} outputs - Array of output configurations
+ * @param {string} outputPath - Path for the output video file
  * @param {Object} analysis - Analysis results from analizeVideo
- * @returns {Promise<Array>} - Processed output files
+ * @param {string} [jobId] - Optional job ID for progress tracking (generated if not provided)
+ * @returns {Promise<Object>} - Processing result
  */
-async function processVideo(inputPath, outputs, analysis) {
-  console.log(`Processing video based on analysis: ${inputPath}`);
+async function processVideo(inputPath, outputPath, analysis, jobId = null) {
+  // Generate a job ID if not provided
+  const processingId = jobId || generateRandomId();
+  console.log(`Processing video with job ID: ${processingId}`);
+  console.log(`Input: ${inputPath}, Output: ${outputPath}`);
   
-  // Create temporary directory in current folder
-  const tempDir = path.join(process.cwd(), 'temp', `quickreels-${Date.now()}`);
+  // Create project-relative temp directory structure
+  const projectRoot = process.cwd();
+  const tempBaseDir = path.join(projectRoot, 'temp');
+  const tempDir = path.join(tempBaseDir, processingId);
+  const framesDir = path.join(tempDir, 'frames');
+  const tempInputPath = path.join(tempDir, 'input.mp4');
+  const tempOutputPath = path.join(tempDir, 'output.mp4');
+  
+  // Create directories
+  if (!fs.existsSync(tempBaseDir)) {
+    fs.mkdirSync(tempBaseDir, { recursive: true });
+  }
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
+  if (!fs.existsSync(framesDir)) {
+    fs.mkdirSync(framesDir, { recursive: true });
+  }
   
-  console.log(`Using temporary directory: ${tempDir}`);
+  console.log(`Created temporary directory: ${tempDir}`);
+  
+  // Update progress.json with job ID
+  updateProgress(processingId, {
+    analysis: { progress: 100, status: "Analysis complete" },
+    processing: { progress: 0, status: "Copying input file..." }
+  });
   
   try {
-    // Extract metadata and positions from analysis
+    // Step 1: Copy input file to temp directory
+    console.log(`Copying input file to: ${tempInputPath}`);
+    fs.copyFileSync(inputPath, tempInputPath);
+    
+    // Step 2: Extract metadata and positions from analysis
     const { metadata, smoothedPositions } = analysis;
-    // Get basic metadata from analysis
     const { width, height, fps } = metadata || {};
+    
+    // Update progress
+    updateProgress(processingId, {
+      processing: { progress: 10, status: "Starting video processing..." }
+    });
     
     // Calculate crop dimensions for 9:16 aspect ratio
     const initialCropWidth = height ? Math.round(height * (9/16)) : 0;
-    console.log(`Original dimensions from analysis: ${width}x${height}, Initial crop width: ${initialCropWidth}`);
+    console.log(`Original dimensions: ${width}x${height}, Initial crop width: ${initialCropWidth}`);
     
-    // Process each output
-    const results = await Promise.all(outputs.map(async (output, index) => {
-      const { url, range } = output;
-      const outputPath = url;
+    // Open the video file to get accurate properties
+    const video = new cv.VideoCapture(tempInputPath);
+    
+    // Get video properties directly from the video
+    const videoWidth = video.get(cv.CAP_PROP_FRAME_WIDTH);
+    const videoHeight = video.get(cv.CAP_PROP_FRAME_HEIGHT);
+    const videoFps = video.get(cv.CAP_PROP_FPS);
+    const videoTotalFrames = video.get(cv.CAP_PROP_FRAME_COUNT);
+    
+    console.log(`Video properties: ${videoWidth}x${videoHeight} @ ${videoFps}fps, ${videoTotalFrames} frames`);
+    
+    // Use video properties if metadata is missing
+    const actualWidth = width || videoWidth;
+    const actualHeight = height || videoHeight;
+    const actualFps = fps || videoFps;
+    const actualTotalFrames = Math.floor(videoTotalFrames);
+    const actualCropWidth = Math.round(actualHeight * (9/16));
+    
+    // Process the entire video
+    const startFrame = 0;
+    const endFrame = actualTotalFrames - 1;
+    
+    console.log(`Processing frames ${startFrame} to ${endFrame} (total frames: ${actualTotalFrames})`);
+    
+    // For progress reporting
+    let processedFrames = 0;
+    const totalFramesToProcess = endFrame - startFrame + 1;
+    let lastProgressReport = Date.now();
+    
+    // For scene change detection
+    let prevGrayFrame = null;
+    
+    // Process frames
+    let currentFrame = 0;
+    
+    console.log('Reading and processing frames...');
+    
+    // Batch processing for better performance
+    const framePromises = [];
+    
+    // Update progress
+    updateProgress(processingId, {
+      processing: { progress: 20, status: "Processing frames..." }
+    });
+    
+    while (true) {
+      // Read a frame from the video
+      const frame = video.read();
       
-      console.log(`Processing output ${index + 1}: ${outputPath}`);
-      
-      // Ensure output directory exists
-      const outputDir = path.dirname(outputPath);
-      if (!fs.existsSync(outputDir)) {
-        fs.mkdirSync(outputDir, { recursive: true });
+      // Check if we've reached the end of the video
+      if (frame.empty) {
+        console.log('Reached end of video');
+        break;
       }
       
-      // Create temporary directory for this output
-      const outputTempDir = path.join(tempDir, `output-${index}`);
-      if (!fs.existsSync(outputTempDir)) {
-        fs.mkdirSync(outputTempDir, { recursive: true });
+      // Stop if we've processed all required frames
+      if (currentFrame > endFrame) {
+        console.log('Reached end frame');
+        break;
       }
       
-      // Open the video file first to get accurate properties
-      const video = new cv.VideoCapture(inputPath);
+      // Calculate the index in the smoothedPositions array
+      const positionIndex = currentFrame - startFrame;
       
-      // Get video properties directly from the video
-      const videoWidth = video.get(cv.CAP_PROP_FRAME_WIDTH);
-      const videoHeight = video.get(cv.CAP_PROP_FRAME_HEIGHT);
-      const videoFps = video.get(cv.CAP_PROP_FPS);
-      const videoTotalFrames = video.get(cv.CAP_PROP_FRAME_COUNT);
+      // Determine the center position (from analysis or default)
+      const normCenter = positionIndex < smoothedPositions.length
+        ? smoothedPositions[positionIndex]
+        : DEFAULT_CENTER;
       
-      console.log(`Video properties from capture: ${videoWidth}x${videoHeight} @ ${videoFps}fps, ${videoTotalFrames} frames`);
-      
-      // Use video properties if metadata is missing
-      const actualWidth = width || videoWidth;
-      const actualHeight = height || videoHeight;
-      const actualFps = fps || videoFps;
-      const actualTotalFrames = Math.floor(videoTotalFrames);
-      const actualCropWidth = Math.round(actualHeight * (9/16));
-      
-      // Get range of frames to process
-      const frameRange = parseFrameRange(range);
-      const startFrame = frameRange ? frameRange.startFrame : 0;
-      let endFrame = frameRange ? frameRange.endFrame : (actualTotalFrames - 1);
-      
-      if (isNaN(endFrame) || endFrame < 0 || endFrame >= actualTotalFrames) {
-        console.warn(`Invalid endFrame: ${endFrame}, using totalFrames from video: ${actualTotalFrames}`);
-        endFrame = actualTotalFrames - 1;
+      if (positionIndex >= smoothedPositions.length && processedFrames % 100 === 0) {
+        console.log(`Warning: No position data for frame ${currentFrame}, using default center`);
       }
       
-      console.log(`Processing frames ${startFrame} to ${endFrame} (total frames in video: ${actualTotalFrames})`);
+      // Calculate crop parameters for this frame
+      const xCenter = Math.floor(normCenter * actualWidth);
+      let xStart = xCenter - Math.floor(actualCropWidth / 2);
       
-      // Use FFmpeg instead of OpenCV's VideoWriter to avoid codec issues
-      // FFmpeg is more reliable for video encoding
-      console.log('Processing video frames and encoding with FFmpeg...');
-      
-      // Create a direct file-based approach instead of piping
-      // This is less error-prone and works more reliably
-      
-      // Create a temporary directory for frames
-      const framesDir = path.join(outputTempDir, 'frames');
-      if (!fs.existsSync(framesDir)) {
-        fs.mkdirSync(framesDir, { recursive: true });
+      // Ensure crop stays within boundaries
+      if (xStart < 0) {
+        xStart = 0;
+      } else if (xStart + actualCropWidth > actualWidth) {
+        xStart = actualWidth - actualCropWidth;
       }
       
-      // For progress reporting
-      let processedFrames = 0;
-      const totalFramesToProcess = endFrame - startFrame + 1;
-      let lastProgressReport = Date.now();
+      // Convert to grayscale for scene change detection
+      const grayFrame = frame.cvtColor(cv.COLOR_BGR2GRAY);
       
-      // For scene change detection
-      let prevGrayFrame = null;
-      
-      // Process frames
-      let currentFrame = 0;
-      
-      console.log('Reading and processing frames directly...');
-      
-      // Move to the starting frame
-      if (startFrame > 0) {
-        video.set(cv.CAP_PROP_POS_FRAMES, startFrame);
-        currentFrame = startFrame;
-      }
-      
-      // Batch processing for better performance
-      const framePromises = [];
-      
-      while (true) {
-        // Read a frame from the video
-        const frame = video.read();
+      // Calculate frame difference if we have a previous frame
+      let frameDiff = 0;
+      if (prevGrayFrame) {
+        frameDiff = mse(grayFrame, prevGrayFrame);
         
-        // Check if we've reached the end of the video
-        if (frame.empty) {
-          console.log('Reached end of video');
-          break;
+        // Log scene changes for debugging
+        if (frameDiff > SCENE_CHANGE_THRESHOLD) {
+          console.log(`Scene change detected at frame ${currentFrame} with diff ${frameDiff.toFixed(2)}`);
         }
-        
-        // Stop if we've processed all required frames
-        if (currentFrame > endFrame) {
-          console.log('Reached end frame');
-          break;
-        }
-        
-        // Calculate the index in the smoothedPositions array
-        const positionIndex = currentFrame - startFrame;
-        
-        // Determine the center position (from analysis or default)
-        const normCenter = positionIndex < smoothedPositions.length
-          ? smoothedPositions[positionIndex]
-          : DEFAULT_CENTER;
-        
-        if (positionIndex >= smoothedPositions.length && processedFrames % 100 === 0) {
-          console.log(`Warning: No position data for frame ${currentFrame} (index ${positionIndex}), using default center`);
-        }
-        
-        // Calculate crop parameters for this frame
-        const xCenter = Math.floor(normCenter * actualWidth);
-        let xStart = xCenter - Math.floor(actualCropWidth / 2);
-        
-        // Ensure crop stays within boundaries
-        if (xStart < 0) {
-          xStart = 0;
-        } else if (xStart + actualCropWidth > actualWidth) {
-          xStart = actualWidth - actualCropWidth;
-        }
-        
-        // Convert to grayscale for scene change detection
-        const grayFrame = frame.cvtColor(cv.COLOR_BGR2GRAY);
-        
-        // Calculate frame difference if we have a previous frame
-        let frameDiff = 0;
-        if (prevGrayFrame) {
-          frameDiff = mse(grayFrame, prevGrayFrame);
-          
-          // Log scene changes for debugging
-          if (frameDiff > SCENE_CHANGE_THRESHOLD) {
-            console.log(`Scene change detected at frame ${currentFrame} with diff ${frameDiff.toFixed(2)}`);
+      }
+      
+      // Store grayscale frame for next comparison
+      prevGrayFrame = grayFrame;
+      
+      // Crop the frame
+      const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, actualHeight));
+      
+      // Save the frame to disk (async)
+      const framePath = path.join(framesDir, `frame_${String(processedFrames).padStart(8, '0')}.png`);
+      framePromises.push(
+        (async () => {
+          try {
+            await cv.imwriteAsync(framePath, croppedFrame);
+          } catch (err) {
+            console.error(`Error writing frame ${currentFrame} to ${framePath}:`, err);
           }
-        }
-        
-        // Store grayscale frame for next comparison
-        prevGrayFrame = grayFrame;
-        
-        // Crop the frame
-        const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, actualHeight));
-        
-        // Save the frame to disk (async)
-        const framePath = path.join(framesDir, `frame-${String(processedFrames).padStart(8, '0')}.png`);
-        framePromises.push(
-          (async () => {
-            try {
-              await cv.imwriteAsync(framePath, croppedFrame);
-            } catch (err) {
-              console.error(`Error writing frame ${currentFrame} to ${framePath}:`, err);
-            }
-          })()
-        );
-        
-        // Process in batches to avoid too many open files
-        if (framePromises.length >= BATCH_SIZE) {
-          await Promise.all(framePromises);
-          framePromises.length = 0;
-        }
-        
-        // Update progress
-        processedFrames++;
-        currentFrame++;
-        
-        // Report progress periodically
-        const now = Date.now();
-        if (now - lastProgressReport > 1000) {
-          const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
-          console.log(`Processing frames: ${progress}%`);
-          fs.writeFileSync('progress.json', JSON.stringify({
-            progress,
-            status: `Processing frames: ${progress}%`
-          }, null, 2));
-          lastProgressReport = now;
-        }
-      }
+        })()
+      );
       
-      // Process any remaining frames
-      if (framePromises.length > 0) {
+      // Process in batches to avoid too many open files
+      if (framePromises.length >= BATCH_SIZE) {
         await Promise.all(framePromises);
+        framePromises.length = 0;
       }
       
-      // Release resources
-      video.release();
+      // Update progress
+      processedFrames++;
+      currentFrame++;
       
-      console.log('Combining frames into video...');
-      
-      // Use FFmpeg to combine frames into a video
-      const tempOutputPath = path.join(outputTempDir, 'temp_output.mp4');
-      
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(path.join(framesDir, 'frame-%08d.png'))
-          .inputOptions([
-            '-framerate', actualFps.toString()
-          ])
-          .outputOptions([
-            '-c:v', 'libx264',
-            '-preset', 'medium', // Balance between speed and compression
-            '-crf', '18',        // High quality (lower value = higher quality)
-            '-pix_fmt', 'yuv420p'
-          ])
-          .output(tempOutputPath)
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
-      });
-      
-      console.log('Adding audio from original video...');
-      
-      // Add audio from the original video using FFmpeg
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(tempOutputPath)
-          .input(inputPath)
-          .outputOptions([
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-map', '0:v:0',
-            '-map', '1:a:0?',
-            '-shortest'  // Ensures the output duration matches the video
-          ])
-          .output(outputPath)
-          .on('end', () => {
-            console.log(`Added audio to ${outputPath}`);
-            resolve();
-          })
-          .on('error', (err) => {
-            console.error(`Error adding audio:`, err);
-            reject(err);
-          })
-          .run();
-      });
-      
-      console.log(`Completed processing output ${index + 1}`);
-      
-      return {
-        outputPath,
-        startFrame,
-        endFrame,
-        duration: ((endFrame - startFrame + 1) / actualFps).toFixed(2)
-      };
-    }));
+      // Report progress periodically
+      const now = Date.now();
+      if (now - lastProgressReport > 1000) {
+        const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
+        // Cap progress at 80% (reserve 20% for encoding)
+        const reportedProgress = Math.min(progress * 0.8, 80);
+        console.log(`Processing frames: ${progress}%`);
+        updateProgress(processingId, {
+          processing: { 
+            progress: reportedProgress, 
+            status: `Processing frames: ${progress}%` 
+          }
+        });
+        lastProgressReport = now;
+      }
+    }
     
-    // Keep temporary files for inspection (comment out to clean up)
-    console.log(`Temporary files are saved in: ${tempDir}`);
-    // Uncomment to clean up:
-    // try {
-    //   if (fs.existsSync(tempDir)) {
-    //     fs.rmSync(tempDir, { recursive: true });
-    //   }
-    // } catch (err) {
-    //   console.warn('Warning: Failed to clean up temporary directory', err);
-    // }
+    // Process any remaining frames
+    if (framePromises.length > 0) {
+      await Promise.all(framePromises);
+    }
     
-    return results;
+    // Release resources
+    video.release();
+    
+    // Update progress for encoding phase
+    updateProgress(processingId, {
+      processing: { progress: 80, status: "Encoding video..." }
+    });
+    
+    console.log('Combining frames into video...');
+    
+    // Use FFmpeg to combine frames into a video
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(path.join(framesDir, 'frame_%08d.png'))
+        .inputOptions([
+          '-framerate', actualFps.toString()
+        ])
+        .outputOptions([
+          '-c:v', 'libx264',
+          '-preset', 'medium', // Balance between speed and compression
+          '-crf', '18',        // High quality (lower value = higher quality)
+          '-pix_fmt', 'yuv420p'
+        ])
+        .output(tempOutputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+    
+    // Update progress for audio addition
+    updateProgress(processingId, {
+      processing: { progress: 90, status: "Adding audio..." }
+    });
+    
+    console.log('Adding audio from original video...');
+    
+    // Create output directory if it doesn't exist
+    const outputDir = path.dirname(outputPath);
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+    
+    // Add audio from the original video using FFmpeg
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(tempOutputPath)
+        .input(tempInputPath)
+        .outputOptions([
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-map', '0:v:0',
+          '-map', '1:a:0?',
+          '-shortest'  // Ensures the output duration matches the video
+        ])
+        .output(outputPath)
+        .on('end', () => {
+          console.log(`Added audio and saved to ${outputPath}`);
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error(`Error adding audio:`, err);
+          reject(err);
+        })
+        .run();
+    });
+    
+    // Update progress for completion
+    updateProgress(processingId, {
+      processing: { progress: 100, status: "Processing complete" },
+      videoGenerated: true
+    });
+    
+    console.log(`Processing complete for job ${processingId}`);
+    
+    // Clean up temporary files
+    try {
+      console.log(`Cleaning up temporary files in: ${tempDir}`);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (err) {
+      console.warn('Warning: Failed to clean up temporary directory', err);
+    }
+    
+    return {
+      jobId: processingId,
+      outputPath,
+      duration: ((endFrame - startFrame + 1) / actualFps).toFixed(2),
+      status: 'completed'
+    };
   } catch (error) {
     console.error('Error processing video:', error);
+    
+    // Update progress to show error
+    updateProgress(processingId, {
+      processing: { progress: -1, status: `Error: ${error.message}` }
+    });
+    
     throw error;
   }
 }
@@ -698,5 +726,7 @@ async function processVideo(inputPath, outputs, analysis) {
 // Export the processVideo function
 module.exports = {
   processVideo,
-  MovementPlanner  // Export for testing or advanced usage
+  MovementPlanner,  // Export for testing or advanced usage
+  generateRandomId,  // Export for reuse in other modules
+  updateProgress     // Export for external use
 }; 
