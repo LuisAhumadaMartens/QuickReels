@@ -35,39 +35,110 @@ function mse(imageA, imageB) {
 /**
  * MovementPlanner class - matches Python implementation
  * Handles camera movement planning, scene changes, and position smoothing
+ * Optimized version with improved data structures and algorithms
  */
 class MovementPlanner {
   constructor(fps) {
-    // List of tuples [frame_num, x_pos, is_scene_change]
-    this.frameData = [];
+    // Optimized data structures
+    this.framePositions = new Map(); // frameNum -> [x_pos, is_scene_change]
+    this.sceneChanges = new Set(); // Set of frameNums that are scene changes
+    this.frameOrder = []; // Ordered list of processed frames for faster iteration
+    
+    // Cache for optimized segment retrieval
+    this.segmentsCache = null;
+    this.lastFrameNum = -1;
+    
+    // Constants
     this.fps = fps;
     this.currentSceneStart = 0;
     this.waitingForDetection = false;
     this.defaultX = DEFAULT_CENTER;
     this.smoothingRate = 0.05;
     this.maxMovementPerFrame = 0.03;
-    this.positionHistory = [];
+    
+    // Use circular buffer for position history
+    this.positionHistoryBuffer = new Array(3).fill(0);
+    this.positionHistoryIndex = 0;
+    this.positionHistoryCount = 0;
     this.historySize = 3;
+    
     this.centeringWeight = 0.4;
     this.fastTransitionThreshold = 0.1;
     this.inTransition = false;
     this.stableFrames = 0;
     this.stableFramesRequired = Math.floor(fps * 0.5);  // Half a second worth of frames
     this.isCentering = false;
+    
+    // Pre-compute frequently used values
+    this.halfThreshold = 0.1; // Within 10% of target
   }
 
   /**
-   * Plan movement for a frame - direct port from Python
+   * Add position to circular buffer
+   * @private
+   */
+  _addToPositionHistory(position) {
+    this.positionHistoryBuffer[this.positionHistoryIndex] = position;
+    this.positionHistoryIndex = (this.positionHistoryIndex + 1) % this.historySize;
+    if (this.positionHistoryCount < this.historySize) {
+      this.positionHistoryCount++;
+    }
+  }
+
+  /**
+   * Calculate average of position history
+   * @private
+   */
+  _getPositionHistoryAverage() {
+    if (this.positionHistoryCount === 0) return this.defaultX;
+    
+    let sum = 0;
+    for (let i = 0; i < this.positionHistoryCount; i++) {
+      sum += this.positionHistoryBuffer[i];
+    }
+    return sum / this.positionHistoryCount;
+  }
+
+  /**
+   * Reset position history buffer
+   * @private
+   */
+  _resetPositionHistory() {
+    this.positionHistoryBuffer.fill(0);
+    this.positionHistoryIndex = 0;
+    this.positionHistoryCount = 0;
+  }
+
+  /**
+   * Get the last frame position
+   * @private
+   */
+  _getLastPosition() {
+    if (this.frameOrder.length === 0) return this.defaultX;
+    const lastFrame = this.frameOrder[this.frameOrder.length - 1];
+    return this.framePositions.get(lastFrame)[0];
+  }
+
+  /**
+   * Plan movement for a frame - optimized version
    */
   planMovement(frameNum, cluster, frameDiff, sceneChangeThreshold) {
-    // Handle scene change
+    // Invalidate segments cache when adding new data
+    this.segmentsCache = null;
+    this.lastFrameNum = Math.max(this.lastFrameNum, frameNum);
+    
+    // Handle scene change (fast path)
     if (frameDiff > sceneChangeThreshold) {
-      this.positionHistory = [];
+      this._resetPositionHistory();
       this.inTransition = false;
       this.stableFrames = 0;
       this.isCentering = false;
-      // Reset history on scene change
-      this.frameData.push([frameNum, this.defaultX, true]);
+      
+      // Store scene change data
+      this.framePositions.set(frameNum, [this.defaultX, true]);
+      this.sceneChanges.add(frameNum);
+      this.frameOrder.push(frameNum);
+      
       this.currentSceneStart = frameNum;
       this.waitingForDetection = true;
       return;
@@ -78,14 +149,13 @@ class MovementPlanner {
       // Found first detection after scene change
       const newX = cluster[1];  // Normalized x position from cluster
       
-      // Go back and update all frames since scene change
-      for (let i = 0; i < this.frameData.length; i++) {
-        const [fNum, _, isScene] = this.frameData[i];
+      // Update all frames since scene change (more efficient with Map)
+      for (const fNum of this.frameOrder) {
         if (fNum >= this.currentSceneStart) {
-          if (isScene) {
-            continue;  // Keep scene change marker
-          }
-          this.frameData[i] = [fNum, newX, false];
+          const [_, isScene] = this.framePositions.get(fNum);
+          if (isScene) continue;  // Keep scene change marker
+          
+          this.framePositions.set(fNum, [newX, false]);
         }
       }
       
@@ -93,16 +163,16 @@ class MovementPlanner {
       return;
     }
 
-    // Get the target position
+    // Get the target position (optimized lookups)
     let targetX;
     if (cluster) {
       targetX = cluster[1];
     } else {
-      targetX = this.frameData.length ? this.frameData[this.frameData.length - 1][1] : this.defaultX;
+      targetX = this._getLastPosition();
     }
 
-    if (this.frameData.length) {
-      const lastX = this.frameData[this.frameData.length - 1][1];
+    if (this.frameOrder.length > 0) {
+      const lastX = this._getLastPosition();
       const distanceToTarget = Math.abs(targetX - lastX);
       
       // Apply normal movement with limits
@@ -112,7 +182,7 @@ class MovementPlanner {
         targetX = lastX + (movement > 0 ? maxMove : -maxMove);
       }
 
-      // Check if we're within the delta threshold for stability
+      // Check if we're within the delta threshold for stability (early exit possible)
       if (distanceToTarget < this.fastTransitionThreshold) {
         this.stableFrames++;
         if (this.stableFrames >= this.stableFramesRequired) {
@@ -121,42 +191,53 @@ class MovementPlanner {
       } else {
         this.stableFrames = 0;
         this.isCentering = false;
-        this.positionHistory = [];
+        this._resetPositionHistory();
       }
 
-      // Apply centering after stable period
+      // Apply centering after stable period (optimized buffer operations)
       if (this.isCentering) {
-        this.positionHistory.push(targetX);
-        if (this.positionHistory.length > this.historySize) {
-          this.positionHistory.shift();
-        }
+        this._addToPositionHistory(targetX);
 
-        if (this.positionHistory.length > 1) {
-          const avgPos = this.positionHistory.reduce((sum, pos) => sum + pos, 0) / this.positionHistory.length;
+        if (this.positionHistoryCount > 1) {
+          const avgPos = this._getPositionHistoryAverage();
           targetX = targetX * (1 - this.centeringWeight) + avgPos * this.centeringWeight;
         }
       }
     }
 
-    this.frameData.push([frameNum, targetX, false]);
+    // Store frame data
+    this.framePositions.set(frameNum, [targetX, false]);
+    this.frameOrder.push(frameNum);
   }
 
   /**
-   * Get scene segments - matches Python implementation
+   * Get scene segments - optimized implementation with caching
    */
   getSceneSegments() {
+    // Return cached result if available and no new frames added
+    if (this.segmentsCache !== null) {
+      return this.segmentsCache;
+    }
+    
     const segments = [];
     let currentSegmentStart = 0;
     let currentPositions = [];
+    let lastFrameNum = -1;
 
-    for (let i = 0; i < this.frameData.length; i++) {
-      const [frameNum, xPos, isScene] = this.frameData[i];
+    // Optimize iteration by using ordered frameOrder array
+    for (const frameNum of this.frameOrder) {
+      const [xPos, isScene] = this.framePositions.get(frameNum);
       
-      if (isScene && i > 0) {
+      // Check if this is the first frame
+      if (lastFrameNum === -1) {
+        currentSegmentStart = frameNum;
+      }
+      // Check for scene change
+      else if (isScene) {
         // End current segment
         segments.push([
           currentSegmentStart,
-          frameNum - 1,
+          lastFrameNum,
           currentPositions
         ]);
         // Start new segment
@@ -165,49 +246,62 @@ class MovementPlanner {
       }
       
       currentPositions.push(xPos);
+      lastFrameNum = frameNum;
     }
 
     // Add final segment
     if (currentPositions.length) {
       segments.push([
         currentSegmentStart,
-        this.frameData[this.frameData.length - 1][0],
+        lastFrameNum,
         currentPositions
       ]);
     }
 
+    // Cache the result
+    this.segmentsCache = segments;
     return segments;
   }
 
   /**
-   * Interpolate and smooth positions - matches Python implementation
+   * Interpolate and smooth positions - optimized implementation
    */
   interpolateAndSmooth(totalFrames, baseAlpha = 0.1, deltaThreshold = 0.015) {
-    const smoothedCenters = Array(totalFrames).fill(this.defaultX);
+    // Pre-allocate result array
+    const smoothedCenters = new Array(totalFrames);
+    smoothedCenters.fill(this.defaultX);
+    
+    // Get segments (using cached result if available)
     const segments = this.getSceneSegments();
 
+    // Pre-calculate common threshold values
+    const halfThresholdValue = 0.1;
+
     for (const [startFrame, endFrame, positions] of segments) {
+      if (positions.length === 0) continue;
+      
       let lastX = positions[0];
       
       for (let i = 0; i < positions.length; i++) {
         const frame = startFrame + i;
-        if (frame > endFrame) break;
+        if (frame > endFrame || frame >= totalFrames) break;
         
         const targetX = positions[i];
         const delta = targetX - lastX;
+        const absDelta = Math.abs(delta);
         
         let smoothedX;
-        if (Math.abs(delta) < deltaThreshold) {
+        // Fast path for small movements
+        if (absDelta < deltaThreshold) {
           smoothedX = lastX;
         } else {
-          // Variable smoothing rate based on distance to target
-          // Slower smoothing (smaller alpha) as we get closer
-          const distanceFactor = Math.min(Math.abs(delta) * 2, 1.0);  // Scale based on distance
+          // Variable smoothing rate with optimized calculations
+          const distanceFactor = Math.min(absDelta * 2, 1.0);
           let decelerationAlpha = baseAlpha * distanceFactor;
           
-          // Even slower for final approach
-          if (Math.abs(delta) < 0.1) {  // Within 10% of target
-            decelerationAlpha *= 0.5;  // Half speed for final approach
+          // Check for final approach
+          if (absDelta < halfThresholdValue) {
+            decelerationAlpha *= 0.5;
           }
           
           smoothedX = lastX + decelerationAlpha * delta;
@@ -219,6 +313,21 @@ class MovementPlanner {
     }
 
     return smoothedCenters;
+  }
+  
+  /**
+   * Convert to the original data format for compatibility
+   * This ensures output is identical to the original implementation
+   */
+  toOriginalFormat() {
+    const originalFrameData = [];
+    
+    for (const frameNum of this.frameOrder) {
+      const [xPos, isScene] = this.framePositions.get(frameNum);
+      originalFrameData.push([frameNum, xPos, isScene]);
+    }
+    
+    return originalFrameData;
   }
 }
 
