@@ -10,11 +10,10 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 // VideoSegment class similar to Python's dataclass
 class VideoSegment {
-  constructor(outputPath, startFrame = null, endFrame = null, debug = false) {
+  constructor(outputPath, startFrame = null, endFrame = null) {
     this.outputPath = outputPath;
     this.startFrame = startFrame;
     this.endFrame = endFrame;
-    this.debug = debug;
   }
 }
 
@@ -164,7 +163,7 @@ class VideoProcessor {
       console.log(`Analyzing video: ${this.inputPath}`);
       const analysis = await videoAnalyzer.analizeVideo(this.inputPath, this.segments.map(s => s.outputPath));
       
-      // Store the analysis results for later use (especially in debug mode)
+      // Store the analysis results for later use
       this._analysisResults = analysis;
       
       // At this point, we should have the analysis results including smoothed positions
@@ -261,38 +260,8 @@ class VideoProcessor {
       segmentPositions = Array(endFrame - startFrame + 1).fill(0.5);
     }
     
-    // Check if we're in debug mode
-    const isDebugMode = segment.debug === true;
-    
-    // Generate the filter string directly instead of using a file
-    let filterScript;
-    if (isDebugMode) {
-      // In debug mode, we'll retrieve keypoint data and generate visualization
-      // First, we need to run the analysis again to get the actual keypoints
-      console.log("Debug mode: Getting keypoint data for visualization");
-      
-      try {
-        // Retrieve keypoint data from original analysis
-        // We'll pull this data from the videoAnalyzer
-        const keypoints = await this._getKeypointDataForSegment(
-          this.inputPath, 
-          startFrame, 
-          endFrame
-        );
-        
-        // Generate a debug filter with keypoint visualization matching Python version
-        filterScript = this._generateDebugFilterScriptWithKeypoints(
-          segmentPositions, 
-          keypoints
-        );
-      } catch (error) {
-        console.error("Error getting keypoint data:", error);
-        // Fall back to simple debug visualization without keypoints
-        filterScript = this._generateDebugFilterScript(segmentPositions);
-      }
-    } else {
-      filterScript = this._generateFilterScript(segmentPositions);
-    }
+    // Generate the filter string for ffmpeg
+    const filterScript = this._generateFilterScript(segmentPositions);
     
     // Log the filter script for debugging
     console.log(`Using filter: ${filterScript.substring(0, 150)}... [truncated]`);
@@ -328,71 +297,82 @@ class VideoProcessor {
   }
   
   /**
-   * Helper method to get keypoint data for a specific segment
-   * @param {string} inputPath - Video input path
-   * @param {number} startFrame - Start frame
-   * @param {number} endFrame - End frame
-   * @returns {Promise<Array>} - Array of keypoint data per frame
+   * Calculate crop dimensions for 9:16 aspect ratio
+   * @returns {Object} Object containing cropWidth, videoWidth, videoHeight
+   * @private
    */
-  async _getKeypointDataForSegment(inputPath, startFrame, endFrame) {
-    console.log(`Getting keypoint data for frames ${startFrame}-${endFrame}`);
+  _calculateCropDimensions() {
+    const targetAspect = 9 / 16;  // vertical video aspect ratio
+    const videoWidth = this.metadata.width;
+    const videoHeight = this.metadata.height;
+    const cropWidth = Math.floor(videoHeight * targetAspect);
     
-    // First attempt: Try to get keypoint data from stored analysis results
-    try {
-      // If we already have analysis results with keypoint data, use that
-      if (this._analysisResults && this._analysisResults.keypointData) {
-        const analysisKeypoints = this._analysisResults.keypointData;
-        console.log(`Found existing keypoint data for ${analysisKeypoints.length} frames from analysis`);
-        
-        // Extract the segment of keypoints that match our frame range
-        return analysisKeypoints.filter(kp => 
-          kp.frame >= startFrame && kp.frame <= endFrame
-        );
-      }
-    } catch (error) {
-      console.warn('Failed to get keypoints from stored analysis:', error);
-    }
+    return { targetAspect, cropWidth, videoWidth, videoHeight };
+  }
+  
+  /**
+   * Ensure position is within video bounds
+   * @param {number} xPos - X position
+   * @param {number} cropWidth - Width of crop window
+   * @param {number} videoWidth - Width of video
+   * @returns {number} Adjusted position
+   * @private
+   */
+  _ensurePositionInBounds(xPos, cropWidth, videoWidth) {
+    if (xPos < 0) xPos = 0;
+    if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
+    return Math.floor(xPos);
+  }
+  
+  /**
+   * Calculate average position from an array of positions
+   * @param {Array<number>} positions - Array of normalized positions (0-1)
+   * @returns {number} Average position
+   * @private
+   */
+  _calculateAveragePosition(positions) {
+    return positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
+  }
+  
+  /**
+   * Generate fallback filter for center position
+   * @param {number} cropWidth - Width of crop window
+   * @param {number} videoWidth - Width of video
+   * @param {number} videoHeight - Height of video
+   * @returns {string} FFmpeg filter string
+   * @private
+   */
+  _generateCenterPositionFilter(cropWidth, videoWidth, videoHeight) {
+    const centerX = Math.floor((videoWidth - cropWidth) / 2);
+    return `crop=${cropWidth}:${videoHeight}:${centerX}:0,scale=1080:1920`;
+  }
+  
+  /**
+   * Generate average position filter 
+   * @param {Array<number>} positions - Array of normalized positions (0-1)
+   * @param {number} cropWidth - Width of crop window
+   * @param {number} videoWidth - Width of video
+   * @param {number} videoHeight - Height of video
+   * @returns {string} FFmpeg filter string
+   * @private
+   */
+  _generateAveragePositionFilter(positions, cropWidth, videoWidth, videoHeight) {
+    const avgPos = this._calculateAveragePosition(positions);
+    const xCenter = Math.floor(avgPos * videoWidth);
+    let xPos = xCenter - (cropWidth / 2);
     
-    // Second attempt: Run a new analysis just for this segment
-    try {
-      // Use videoAnalyzer to run a limited analysis on this segment
-      const videoAnalyzer = require('./analizeVideo');
-      
-      // Attempt to get real data if possible
-      return await videoAnalyzer.getKeypointsForSegment(
-        inputPath, 
-        startFrame, 
-        endFrame
-      );
-    } catch (error) {
-      console.error("Error getting keypoint data:", error);
-      
-      // If all else fails, return placeholder data
-      const numFrames = endFrame - startFrame + 1;
-      const keypointData = [];
-      
-      for (let i = 0; i < numFrames; i++) {
-        keypointData.push({
-          frame: startFrame + i,
-          keypoints: [],
-          detected: false
-        });
-      }
-      
-      return keypointData;
-    }
+    xPos = this._ensurePositionInBounds(xPos, cropWidth, videoWidth);
+    
+    return `crop=${cropWidth}:${videoHeight}:${xPos}:0,scale=1080:1920`;
   }
   
   _generateFilterScript(positions) {
-    // Determine crop width (9:16 aspect ratio for vertical video)
-    const targetAspect = 9 / 16;  // vertical video aspect ratio
-    const cropWidth = Math.floor(this.metadata.height * targetAspect);
-    const videoWidth = this.metadata.width;
+    // Use the utility method to calculate dimensions
+    const { cropWidth, videoWidth, videoHeight } = this._calculateCropDimensions();
     
     // Check if we have valid positions or use center as fallback
     if (!positions || positions.length === 0) {
-      const centerX = Math.floor((videoWidth - cropWidth) / 2);
-      return `crop=${cropWidth}:${this.metadata.height}:${centerX}:0,scale=1080:1920`;
+      return this._generateCenterPositionFilter(cropWidth, videoWidth, videoHeight);
     }
     
     // Generate a complex filter with multiple crops and timeline positions
@@ -404,25 +384,15 @@ class VideoProcessor {
       let xPos = xCenter - (cropWidth / 2);
       
       // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
+      xPos = this._ensurePositionInBounds(xPos, cropWidth, videoWidth);
       
-      return `crop=${cropWidth}:${this.metadata.height}:${Math.floor(xPos)}:0`;
+      return `crop=${cropWidth}:${videoHeight}:${xPos}:0`;
     });
     
     // For a large number of positions, use a simpler approach
     // FFmpeg can't handle thousands of filter commands efficiently
     if (cropCommands.length > 10) {
-      // Calculate average position or use more sophisticated approach if needed
-      const avgPos = positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
-      const xCenter = Math.floor(avgPos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      return `crop=${cropWidth}:${this.metadata.height}:${Math.floor(xPos)}:0,scale=1080:1920`;
+      return this._generateAveragePositionFilter(positions, cropWidth, videoWidth, videoHeight);
     }
     
     // For small number of positions (e.g. during testing), 
@@ -437,216 +407,21 @@ class VideoProcessor {
       let xPos = xCenter - (cropWidth / 2);
       
       // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
+      xPos = this._ensurePositionInBounds(xPos, cropWidth, videoWidth);
       
       // Convert frame index to timestamp (assuming constant frame rate)
       const timestamp = index / this.metadata.fps;
-      cmdFileContent += `${timestamp} crop x ${Math.floor(xPos)}\n`;
+      cmdFileContent += `${timestamp} crop x ${xPos}\n`;
     });
     
     // Use sendcmd filter with crop
     const filter = `sendcmd=c='${cmdFileContent.replace(/'/g, "\''")}',` +
-                   `crop=${cropWidth}:${this.metadata.height}:0:0,scale=1080:1920`;
+                   `crop=${cropWidth}:${videoHeight}:0:0,scale=1080:1920`;
     
     // For very long videos or many positions, this approach may not work
     // In that case, we'll fall back to the average position
     if (cmdFileContent.length > 10000) {
-      const avgPos = positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
-      const xCenter = Math.floor(avgPos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      return `crop=${cropWidth}:${this.metadata.height}:${Math.floor(xPos)}:0,scale=1080:1920`;
-    }
-    
-    return filter;
-  }
-  
-  _generateDebugFilterScript(positions) {
-    // Determine crop width (9:16 aspect ratio for vertical video)
-    const targetAspect = 9 / 16;  // vertical video aspect ratio
-    const cropWidth = Math.floor(this.metadata.height * targetAspect);
-    const videoWidth = this.metadata.width;
-    const videoHeight = this.metadata.height;
-    
-    // Check if we have valid positions or use center as fallback
-    if (!positions || positions.length === 0) {
-      const centerX = Math.floor((videoWidth - cropWidth) / 2);
-      
-      // Add a dot at the center position
-      const dotX = videoWidth / 2;
-      const dotY = videoHeight / 2;
-      
-      return `drawbox=x=${dotX-5}:y=${dotY-5}:w=10:h=10:color=red@0.8:t=fill,` +
-             `crop=${cropWidth}:${videoHeight}:${centerX}:0,scale=1080:1920`;
-    }
-    
-    // Create a command file string with position changes and draw dots
-    let cmdFileContent = '';
-    const drawCommands = [];
-    
-    positions.forEach((pos, index) => {
-      const xCenter = Math.floor(pos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      // Convert frame index to timestamp (assuming constant frame rate)
-      const timestamp = index / this.metadata.fps;
-      cmdFileContent += `${timestamp} crop x ${Math.floor(xPos)}\n`;
-      
-      // Add a command to draw a dot at the center position
-      // (This has to be added at exact frame timestamps)
-      drawCommands.push(`${timestamp} drawbox x ${xCenter-5} y ${videoHeight/2-5} w 10 h 10 color red@0.8 t fill`);
-    });
-    
-    // Combine the crop commands with draw commands
-    const combinedCmdContent = cmdFileContent + '\n' + drawCommands.join('\n');
-    
-    // Use sendcmd filter with crop and drawing
-    const filter = `sendcmd=c='${combinedCmdContent.replace(/'/g, "\''")}',` +
-                   `drawbox=x=0:y=0:w=10:h=10:color=red@0:t=fill,` + // Initial invisible dot
-                   `crop=${cropWidth}:${videoHeight}:0:0,scale=1080:1920`;
-    
-    // For very long videos or many positions, this approach may not work
-    // In that case, we'll fall back to the simpler approach
-    if (combinedCmdContent.length > 10000) {
-      // Calculate average position
-      const avgPos = positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
-      const xCenter = Math.floor(avgPos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      // Add a dot at the center position
-      return `drawbox=x=${xCenter-5}:y=${videoHeight/2-5}:w=10:h=10:color=red@0.8:t=fill,` +
-             `crop=${cropWidth}:${videoHeight}:${Math.floor(xPos)}:0,scale=1080:1920`;
-    }
-    
-    return filter;
-  }
-  
-  _generateDebugFilterScriptWithKeypoints(positions, keypoints) {
-    // Determine crop width (9:16 aspect ratio for vertical video)
-    const targetAspect = 9 / 16;  // vertical video aspect ratio
-    const cropWidth = Math.floor(this.metadata.height * targetAspect);
-    const videoWidth = this.metadata.width;
-    const videoHeight = this.metadata.height;
-    
-    console.log(`Debug visualization: Video dimensions ${videoWidth}x${videoHeight}, crop width ${cropWidth}`);
-    
-    // Check if we have valid positions or use center as fallback
-    if (!positions || positions.length === 0) {
-      const centerX = Math.floor((videoWidth - cropWidth) / 2);
-      
-      // Add a dot at the center position
-      const dotX = videoWidth / 2;
-      const dotY = videoHeight / 2;
-      
-      return `drawbox=x=${dotX-5}:y=${dotY-5}:w=10:h=10:color=red@0.8:t=fill,` +
-             `crop=${cropWidth}:${videoHeight}:${centerX}:0,scale=1080:1920`;
-    }
-    
-    // Create a command file string with position changes
-    let cmdFileContent = '';
-    const drawCommands = [];
-    
-    // This approach is similar to how the Python version does it in process_frame
-    positions.forEach((pos, index) => {
-      // Calculate crop position
-      const xCenter = Math.floor(pos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside the frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      // Convert frame index to timestamp (assuming constant frame rate)
-      const timestamp = index / this.metadata.fps;
-      
-      // Add crop command
-      cmdFileContent += `${timestamp} crop x ${Math.floor(xPos)}\n`;
-      
-      // Add tracking dot at center position (this shows camera tracking)
-      drawCommands.push(`${timestamp} drawbox x ${xCenter-5} y ${videoHeight/2-5} w 10 h 10 color red@0.8 t fill`);
-      
-      // Get keypoints for this frame
-      const frameKeypoints = keypoints[index]?.keypoints;
-      
-      // Add keypoint visualization exactly as Python does
-      if (frameKeypoints && frameKeypoints.length > 0) {
-        frameKeypoints.forEach((kp, kpIndex) => {
-          // In the Python version, keypoints are in the format [y, x, confidence]
-          if (kp && kp.length >= 3 && kp[2] > 0.3) { // Confidence threshold same as Python
-            const y = kp[0]; // Normalized y coordinate
-            const x = kp[1]; // Normalized x coordinate
-            const conf = kp[2]; // Confidence score
-            
-            if (!isNaN(x) && !isNaN(y) && !isNaN(conf)) {
-              // Calculate pixel coordinates
-              const xPixel = Math.floor(x * videoWidth);
-              const yPixel = Math.floor(y * videoHeight);
-              
-              // Calculate x position relative to the crop window
-              const relativeX = xPixel - xPos;
-              
-              // Only draw if the point is within the cropped area
-              if (relativeX >= 0 && relativeX < cropWidth) {
-                // Draw green circle for keypoint (same as cv2.circle in Python)
-                drawCommands.push(`${timestamp} drawbox x ${relativeX-5} y ${yPixel-5} w 10 h 10 color green@0.8 t fill`);
-                
-                // In the Python version, we use cv2.putText to show confidence percentage
-                // FFmpeg's drawtext filter requires a complex setup, so we'll use a simpler approach
-                // That gives the same visual appearance - showing confidence text
-                
-                // Format confidence as percentage
-                const confPercent = Math.floor(conf * 100);
-                
-                // Add text background box (easier than text)
-                drawCommands.push(`${timestamp} drawbox x ${relativeX+10} y ${yPixel-20} w 35 h 15 color black@0.5 t fill`);
-                
-                // For a more complex implementation, you would add actual text
-                // But this requires a font file and more complex filter setup
-              }
-            }
-          }
-        });
-      }
-    });
-    
-    // Combine the crop commands with draw commands
-    const combinedCmdContent = cmdFileContent + '\n' + drawCommands.join('\n');
-    
-    // FFmpeg filter command with sendcmd for dynamic updates
-    const filter = `sendcmd=c='${combinedCmdContent.replace(/'/g, "\''")}',` +
-                   `drawbox=x=0:y=0:w=10:h=10:color=red@0:t=fill,` + // Initial invisible dot
-                   `crop=${cropWidth}:${videoHeight}:0:0,` +
-                   `scale=1080:1920`;
-    
-    // If the command is too long for FFmpeg to handle, use a simplified version
-    if (combinedCmdContent.length > 10000) {
-      console.warn('Debug command too long, using simplified version');
-      // Use average position for crop
-      const avgPos = positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
-      const xCenter = Math.floor(avgPos * videoWidth);
-      let xPos = xCenter - (cropWidth / 2);
-      
-      // Ensure we don't go outside frame boundaries
-      if (xPos < 0) xPos = 0;
-      if (xPos + cropWidth > videoWidth) xPos = videoWidth - cropWidth;
-      
-      // Simple filter with center dot only
-      return `drawbox=x=${xCenter-5}:y=${videoHeight/2-5}:w=10:h=10:color=red@0.8:t=fill,` +
-             `crop=${cropWidth}:${videoHeight}:${Math.floor(xPos)}:0,` +
-             `scale=1080:1920`;
+      return this._generateAveragePositionFilter(positions, cropWidth, videoWidth, videoHeight);
     }
     
     return filter;
@@ -659,4 +434,4 @@ module.exports = {
   parseFrameRange,
   getVideoMetadata,
   extractFrames
-}; 
+};

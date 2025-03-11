@@ -1,9 +1,7 @@
 const net = require('net');
 
-// Track ports being used by QuickReels instances
 const activeQuickReelsPorts = new Set();
 
-// Function to check if a port is available
 function isPortAvailable(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -27,7 +25,6 @@ function isPortAvailable(port) {
   });
 }
 
-// Function to find next available port
 async function findAvailablePort(startPort) {
   let port = startPort;
   let portStatus;
@@ -38,7 +35,6 @@ async function findAvailablePort(startPort) {
   return port;
 }
 
-// Function to check ports in a range
 async function checkPortRange(startPort, endPort) {
   console.log('\nChecking port availability:');
   for (let port = startPort; port <= endPort; port++) {
