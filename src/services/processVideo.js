@@ -372,19 +372,37 @@ function updateProgress(jobId, statusUpdate) {
       };
     }
     
-    // Update job data with the provided updates
+    // Update job data with the provided updates, but ensure progress never regresses
     if (statusUpdate.analysis) {
-      progressData[jobId].analysis = {
-        ...progressData[jobId].analysis,
-        ...statusUpdate.analysis
-      };
+      // Only update progress if the new value is higher than the existing one
+      // (unless it's an error state with progress = -1)
+      if (statusUpdate.analysis.progress === -1 || 
+          !progressData[jobId].analysis || 
+          statusUpdate.analysis.progress >= progressData[jobId].analysis.progress) {
+        progressData[jobId].analysis = {
+          ...progressData[jobId].analysis,
+          ...statusUpdate.analysis
+        };
+      } else {
+        // Only update the status text, keep the higher progress value
+        progressData[jobId].analysis.status = statusUpdate.analysis.status;
+      }
     }
     
     if (statusUpdate.processing) {
-      progressData[jobId].processing = {
-        ...progressData[jobId].processing,
-        ...statusUpdate.processing
-      };
+      // Only update progress if the new value is higher than the existing one
+      // (unless it's an error state with progress = -1)
+      if (statusUpdate.processing.progress === -1 || 
+          !progressData[jobId].processing || 
+          statusUpdate.processing.progress >= progressData[jobId].processing.progress) {
+        progressData[jobId].processing = {
+          ...progressData[jobId].processing,
+          ...statusUpdate.processing
+        };
+      } else {
+        // Only update the status text, keep the higher progress value
+        progressData[jobId].processing.status = statusUpdate.processing.status;
+      }
     }
     
     if (statusUpdate.videoGenerated !== undefined) {
@@ -394,19 +412,22 @@ function updateProgress(jobId, statusUpdate) {
     // If video is generated or there's an error, schedule removal
     if (statusUpdate.videoGenerated === true || 
         (statusUpdate.processing && statusUpdate.processing.status && statusUpdate.processing.status.startsWith("Error"))) {
-      // Wait a bit before deleting to ensure clients can read final status
-      setTimeout(() => {
-        try {
-          if (fs.existsSync('progress.json')) {
-            let currentData = JSON.parse(fs.readFileSync('progress.json', 'utf-8'));
-            delete currentData[jobId];
-            fs.writeFileSync('progress.json', JSON.stringify(currentData, null, 2));
-            console.log(`Removed completed job ${jobId} from progress tracking`);
-          }
-        } catch (err) {
-          console.warn(`Warning: Could not remove job ${jobId} from progress tracking:`, err);
-        }
-      }, 30000); // Wait 30 seconds before removing
+      // Immediately remove the job from progress.json instead of waiting
+      try {
+        // Write updated progress data first
+        fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+        
+        // Log completion
+        console.log(`Job ${jobId} completed, marked for immediate removal from progress tracking`);
+        
+        // Immediately delete the entry from progress.json
+        delete progressData[jobId];
+        fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+        
+        return; // Skip the regular write since we've already written the file
+      } catch (err) {
+        console.warn(`Warning: Could not remove job ${jobId} from progress tracking:`, err);
+      }
     }
     
     // Write updated progress data
@@ -613,13 +634,12 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       const now = Date.now();
       if (now - lastProgressReport > 1000) {
         const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
-        // Cap progress at 80% (reserve 20% for encoding)
-        const reportedProgress = Math.min(progress * 0.8, 80);
-        console.log(`Processing frames: ${progress}% (reported as ${reportedProgress}%)`);
+        // Remove the cap at 80% - let it go all the way to 100%
+        console.log(`Processing frames: ${progress}%`);
         updateProgress(processingId, {
           processing: { 
-            progress: reportedProgress, 
-            status: `Processing frames: ${reportedProgress}%` 
+            progress: progress, 
+            status: `Processing frames: ${progress}%` 
           }
         });
         lastProgressReport = now;
@@ -634,10 +654,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Release resources
     video.release();
     
-    // Update progress for encoding phase
-    updateProgress(processingId, {
-      processing: { progress: 80, status: "Encoding video..." }
-    });
+    // Update progress for encoding phase - only if frames progress was less than 100%
+    // This prevents overwriting a 100% progress from frame processing
+    if (processedFrames < totalFramesToProcess) {
+      updateProgress(processingId, {
+        processing: { progress: 100, status: "Encoding video: 100%" }
+      });
+    }
     
     console.log('Combining frames into video...');
     
@@ -660,9 +683,9 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         .run();
     });
     
-    // Update progress for audio addition
+    // We already reached 100% for processing, so we just update the status text
     updateProgress(processingId, {
-      processing: { progress: 90, status: "Adding audio..." }
+      processing: { progress: 100, status: "Adding audio: 100%" }
     });
     
     console.log('Adding audio from original video...');
@@ -688,6 +711,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         .output(outputPath)
         .on('end', () => {
           console.log(`Added audio and saved to ${outputPath}`);
+          
+          // Update progress to 100% when audio is added and file is saved
+          updateProgress(processingId, {
+            processing: { progress: 100, status: "Processing complete: 100%" },
+            videoGenerated: true
+          });
+          
           resolve();
         })
         .on('error', (err) => {
@@ -695,12 +725,6 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           reject(err);
         })
         .run();
-    });
-    
-    // Update progress for completion
-    updateProgress(processingId, {
-      processing: { progress: 100, status: "Processing complete" },
-      videoGenerated: true
     });
     
     console.log(`Processing complete for job ${processingId}`);

@@ -299,7 +299,7 @@ async function analizeVideo(inputPath, jobId = null) {
     // If we have a job ID, update progress
     if (jobId) {
       updateProgress(jobId, {
-        analysis: { progress: 5, status: "Initializing analysis..." }
+        analysis: { progress: 0, status: "Initializing analysis..." }
       });
     }
     
@@ -337,10 +337,10 @@ async function analizeVideo(inputPath, jobId = null) {
     console.log(`Copying input file to: ${tempInputPath}`);
     fs.copyFileSync(inputPath, tempInputPath);
     
-    // Extract video metadata
+    // Extract video metadata - still at 0% progress, just update the status text
     if (jobId) {
       updateProgress(jobId, {
-        analysis: { progress: 10, status: "Extracting video metadata..." }
+        analysis: { progress: 0, status: "Extracting video metadata..." }
       });
     }
     
@@ -368,10 +368,10 @@ async function analizeVideo(inputPath, jobId = null) {
     
     console.log(`Video metadata: ${JSON.stringify(metadata)}`);
     
-    // Extract frames for analysis (at full frame rate)
+    // Extract frames for analysis - still at 0% progress, just update the status
     if (jobId) {
       updateProgress(jobId, {
-        analysis: { progress: 15, status: "Extracting frames for analysis..." }
+        analysis: { progress: 0, status: "Extracting frames for analysis..." }
       });
     }
     
@@ -403,10 +403,10 @@ async function analizeVideo(inputPath, jobId = null) {
     const frameDiffs = [];
     const sceneChanges = [];
     
-    // Update progress for analysis starting
+    // Update progress for analysis starting - still at 0% but updating the status
     if (jobId) {
       updateProgress(jobId, {
-        analysis: { progress: 20, status: "Analyzing frames..." }
+        analysis: { progress: 0, status: "Analyzing frames: 0%" }
       });
     }
     
@@ -468,13 +468,12 @@ async function analizeVideo(inputPath, jobId = null) {
         const progress = Math.floor((i / frameFiles.length) * 100);
         console.log(`Analyzing: ${progress}%`);
         
-        // Update progress with new structure if we have a job ID
+        // Update progress with the direct percentage value
         if (jobId) {
-          const analysisProgress = Math.min(20 + Math.floor(progress * 0.75), 95); // Scale from 20% to 95%
           updateProgress(jobId, {
             analysis: { 
-              progress: analysisProgress, 
-              status: `Analyzing frames: ${analysisProgress}%` 
+              progress: progress, 
+              status: `Analyzing frames: ${progress}%` 
             }
           });
         }

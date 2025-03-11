@@ -88,11 +88,7 @@ app.post('/process-reel', async (req, res) => {
     // Start processing in the background
     (async () => {
       try {
-        // Update analysis progress
-        updateProgress(jobId, {
-          analysis: { progress: 20, status: "Analyzing video..." }
-        });
-        
+        // Run analysis (progress will be updated by the function)
         const analysis = await analizeVideo(input, jobId);
         
         // Mark analysis as complete
