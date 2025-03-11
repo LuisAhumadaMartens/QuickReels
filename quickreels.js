@@ -93,7 +93,7 @@ app.post('/process-reel', async (req, res) => {
           analysis: { progress: 20, status: "Analyzing video..." }
         });
         
-        const analysis = await analizeVideo(input);
+        const analysis = await analizeVideo(input, jobId);
         
         // Mark analysis as complete
         updateProgress(jobId, {

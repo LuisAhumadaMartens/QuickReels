@@ -9,6 +9,7 @@ const EventEmitter = require('events');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 const config = require('../config/config');
+const { updateProgress, generateRandomId } = require('./processVideo');
 
 // Set the ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -288,26 +289,63 @@ function formatTimecode(seconds) {
 /**
  * Analyze video and extract camera tracking data
  * @param {string} inputPath - Path to input video
+ * @param {string} [jobId] - Optional job ID for progress tracking
  * @returns {Object} - Analysis results
  */
-async function analizeVideo(inputPath) {
+async function analizeVideo(inputPath, jobId = null) {
   console.log(`Analyzing video: ${inputPath}`);
   
   try {
+    // If we have a job ID, update progress
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: 5, status: "Initializing analysis..." }
+      });
+    }
+    
     // Initialize TensorFlow and load model
     await initializeTensorFlow();
     
-    // Create temporary directory in current folder
-    const tempDir = path.join(process.cwd(), 'temp', `quickreels-analysis-${Date.now()}`);
+    // Generate a job ID if not provided
+    const processingId = jobId || generateRandomId();
+    
+    // Create project-relative temp directory structure
+    const projectRoot = process.cwd();
+    const tempBaseDir = path.join(projectRoot, 'temp');
+    const tempDir = path.join(tempBaseDir, processingId);
+    const framesDir = path.join(tempDir, 'frames');
+    const analysisFramesDir = path.join(framesDir, 'analysis');
+    const tempInputPath = path.join(tempDir, 'input.mp4');
+    
+    // Create directories
+    if (!fs.existsSync(tempBaseDir)) {
+      fs.mkdirSync(tempBaseDir, { recursive: true });
+    }
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
+    }
+    if (!fs.existsSync(framesDir)) {
+      fs.mkdirSync(framesDir, { recursive: true });
+    }
+    if (!fs.existsSync(analysisFramesDir)) {
+      fs.mkdirSync(analysisFramesDir, { recursive: true });
     }
     
     console.log(`Using temporary directory: ${tempDir}`);
     
+    // Copy input file to temp directory
+    console.log(`Copying input file to: ${tempInputPath}`);
+    fs.copyFileSync(inputPath, tempInputPath);
+    
     // Extract video metadata
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: 10, status: "Extracting video metadata..." }
+      });
+    }
+    
     const metadata = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      ffmpeg.ffprobe(tempInputPath, (err, metadata) => {
         if (err) return reject(err);
         
         const { width, height, duration, r_frame_rate } = metadata.streams[0];
@@ -331,15 +369,16 @@ async function analizeVideo(inputPath) {
     console.log(`Video metadata: ${JSON.stringify(metadata)}`);
     
     // Extract frames for analysis (at full frame rate)
-    const framesDir = path.join(tempDir, 'frames');
-    if (!fs.existsSync(framesDir)) {
-      fs.mkdirSync(framesDir, { recursive: true });
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: 15, status: "Extracting frames for analysis..." }
+      });
     }
     
     await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
+      ffmpeg(tempInputPath)
         .outputOptions(['-vf', `fps=${metadata.fps}`, '-q:v', '1'])
-        .output(path.join(framesDir, 'frame-%04d.jpg'))
+        .output(path.join(analysisFramesDir, 'frame_%04d.jpg'))
         .on('end', resolve)
         .on('error', reject)
         .run();
@@ -348,11 +387,11 @@ async function analizeVideo(inputPath) {
     console.log('Frames extracted for analysis');
     
     // Get all frame files sorted by number
-    const frameFiles = fs.readdirSync(framesDir)
-      .filter(file => file.startsWith('frame-') && file.endsWith('.jpg'))
+    const frameFiles = fs.readdirSync(analysisFramesDir)
+      .filter(file => file.startsWith('frame_') && file.endsWith('.jpg'))
       .sort((a, b) => {
-        const numA = parseInt(a.match(/frame-(\d+)/)[1]);
-        const numB = parseInt(b.match(/frame-(\d+)/)[1]);
+        const numA = parseInt(a.match(/frame_(\d+)/)[1]);
+        const numB = parseInt(b.match(/frame_(\d+)/)[1]);
         return numA - numB;
       });
     
@@ -364,9 +403,16 @@ async function analizeVideo(inputPath) {
     const frameDiffs = [];
     const sceneChanges = [];
     
+    // Update progress for analysis starting
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: 20, status: "Analyzing frames..." }
+      });
+    }
+    
     // First pass: Analyze each frame (like in Python)
     for (let i = 0; i < frameFiles.length; i++) {
-      const frameFile = path.join(framesDir, frameFiles[i]);
+      const frameFile = path.join(analysisFramesDir, frameFiles[i]);
       const imageBuffer = fs.readFileSync(frameFile);
       
       // Prepare grayscale image for scene change detection
@@ -422,36 +468,55 @@ async function analizeVideo(inputPath) {
         const progress = Math.floor((i / frameFiles.length) * 100);
         console.log(`Analyzing: ${progress}%`);
         
-        // Update progress.json similar to Python implementation
-        fs.writeFileSync('progress.json', JSON.stringify({
-          progress,
-          status: `Analyzing: ${progress}%`
-        }, null, 2));
+        // Update progress with new structure if we have a job ID
+        if (jobId) {
+          const analysisProgress = Math.min(20 + Math.floor(progress * 0.75), 95); // Scale from 20% to 95%
+          updateProgress(jobId, {
+            analysis: { 
+              progress: analysisProgress, 
+              status: `Analyzing frames: ${analysisProgress}%` 
+            }
+          });
+        }
       }
     }
     
     // Apply smoothing algorithm from Python implementation
     const smoothedPositions = planner.interpolateAndSmooth(frameFiles.length);
     
+    // Update progress for completion of analysis
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: 100, status: "Analysis complete" }
+      });
+    }
+    
     // Clean up
     prevFrameGray?.dispose();
     
-    try {
-      fs.rmSync(tempDir, { recursive: true });
-    } catch (err) {
-      console.warn('Warning: Failed to clean up temporal directory', err);
-    }
+    // Clean up temporary directory at the end (optional, since processing may need it)
+    // Instead of deleting, we will leave it for processVideo to use and clean up
     
     // Return analysis results
     return {
-      inputPath,
+      inputPath: tempInputPath,
       metadata,
       sceneChanges,
       frameDiffs,
-      smoothedPositions
+      smoothedPositions,
+      jobId: processingId,
+      tempDir: tempDir
     };
   } catch (error) {
     console.error('Error analyzing video:', error);
+    
+    // Update progress with error if we have a job ID
+    if (jobId) {
+      updateProgress(jobId, {
+        analysis: { progress: -1, status: `Error: ${error.message}` }
+      });
+    }
+    
     throw error;
   }
 }

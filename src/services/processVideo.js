@@ -425,20 +425,21 @@ function updateProgress(jobId, statusUpdate) {
  * @returns {Promise<Object>} - Processing result
  */
 async function processVideo(inputPath, outputPath, analysis, jobId = null) {
-  // Generate a job ID if not provided
-  const processingId = jobId || generateRandomId();
+  // Use the job ID from analysis if available, otherwise generate a new one
+  const processingId = analysis.jobId || jobId || generateRandomId();
   console.log(`Processing video with job ID: ${processingId}`);
   console.log(`Input: ${inputPath}, Output: ${outputPath}`);
   
   // Create project-relative temp directory structure
   const projectRoot = process.cwd();
   const tempBaseDir = path.join(projectRoot, 'temp');
-  const tempDir = path.join(tempBaseDir, processingId);
+  const tempDir = analysis.tempDir || path.join(tempBaseDir, processingId);
   const framesDir = path.join(tempDir, 'frames');
+  const processingFramesDir = path.join(framesDir, 'processing');
   const tempInputPath = path.join(tempDir, 'input.mp4');
   const tempOutputPath = path.join(tempDir, 'output.mp4');
   
-  // Create directories
+  // Create directories if they don't exist yet
   if (!fs.existsSync(tempBaseDir)) {
     fs.mkdirSync(tempBaseDir, { recursive: true });
   }
@@ -448,8 +449,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   if (!fs.existsSync(framesDir)) {
     fs.mkdirSync(framesDir, { recursive: true });
   }
+  if (!fs.existsSync(processingFramesDir)) {
+    fs.mkdirSync(processingFramesDir, { recursive: true });
+  }
   
-  console.log(`Created temporary directory: ${tempDir}`);
+  console.log(`Using temporary directory: ${tempDir}`);
   
   // Update progress.json with job ID
   updateProgress(processingId, {
@@ -458,9 +462,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   });
   
   try {
-    // Step 1: Copy input file to temp directory
-    console.log(`Copying input file to: ${tempInputPath}`);
-    fs.copyFileSync(inputPath, tempInputPath);
+    // Step 1: Copy input file to temp directory if not already there
+    if (!fs.existsSync(tempInputPath)) {
+      console.log(`Copying input file to: ${tempInputPath}`);
+      fs.copyFileSync(inputPath, tempInputPath);
+    } else {
+      console.log(`Input file already exists at: ${tempInputPath}`);
+    }
     
     // Step 2: Extract metadata and positions from analysis
     const { metadata, smoothedPositions } = analysis;
@@ -580,7 +588,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, actualHeight));
       
       // Save the frame to disk (async)
-      const framePath = path.join(framesDir, `frame_${String(processedFrames).padStart(8, '0')}.png`);
+      const framePath = path.join(processingFramesDir, `frame_${String(processedFrames).padStart(8, '0')}.png`);
       framePromises.push(
         (async () => {
           try {
@@ -607,11 +615,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
         // Cap progress at 80% (reserve 20% for encoding)
         const reportedProgress = Math.min(progress * 0.8, 80);
-        console.log(`Processing frames: ${progress}%`);
+        console.log(`Processing frames: ${progress}% (reported as ${reportedProgress}%)`);
         updateProgress(processingId, {
           processing: { 
             progress: reportedProgress, 
-            status: `Processing frames: ${progress}%` 
+            status: `Processing frames: ${reportedProgress}%` 
           }
         });
         lastProgressReport = now;
@@ -636,7 +644,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Use FFmpeg to combine frames into a video
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(path.join(framesDir, 'frame_%08d.png'))
+        .input(path.join(processingFramesDir, 'frame_%08d.png'))
         .inputOptions([
           '-framerate', actualFps.toString()
         ])
