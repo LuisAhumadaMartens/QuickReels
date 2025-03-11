@@ -14,7 +14,7 @@ const ASPECT_RATIO = 9 / 16;  // output crop aspect ratio
 const SCENE_CHANGE_THRESHOLD = 3000;
 
 // Define a batch size for processing frames
-const BATCH_SIZE = 30;  // Increased from 10 to 30 for better parallelism
+const BATCH_SIZE = 10;
 
 /**
  * Calculate Mean Squared Error between two images
@@ -316,14 +316,12 @@ async function processVideo(inputPath, outputs, analysis) {
   try {
     // Extract metadata and positions from analysis
     const { metadata, smoothedPositions } = analysis;
-    const { width, height, fps } = metadata;
+    // Get basic metadata from analysis
+    const { width, height, fps } = metadata || {};
     
     // Calculate crop dimensions for 9:16 aspect ratio
-    const cropWidth = Math.round(height * (9/16));
-    console.log(`Original dimensions: ${width}x${height}, Crop width: ${cropWidth}`);
-    
-    // Keep the smoothedPositions in memory only, similar to the Python implementation
-    // No longer saving coordinates to a file
+    const initialCropWidth = height ? Math.round(height * (9/16)) : 0;
+    console.log(`Original dimensions from analysis: ${width}x${height}, Initial crop width: ${initialCropWidth}`);
     
     // Process each output
     const results = await Promise.all(outputs.map(async (output, index) => {
@@ -338,174 +336,219 @@ async function processVideo(inputPath, outputs, analysis) {
         fs.mkdirSync(outputDir, { recursive: true });
       }
       
-      // Create temporary directory for output
-      const outputTempDir = path.join(tempDir, `output_${index}`);
+      // Create temporary directory for this output
+      const outputTempDir = path.join(tempDir, `output-${index}`);
       if (!fs.existsSync(outputTempDir)) {
         fs.mkdirSync(outputTempDir, { recursive: true });
       }
       
-      // Process frames one by one, like the Python implementation
-      // This provides smoother camera movement instead of segmenting similar positions
-      const totalFrames = smoothedPositions.length;
+      // Open the video file first to get accurate properties
+      const video = new cv.VideoCapture(inputPath);
       
-      // Create directories for extracted frames and processed frames
+      // Get video properties directly from the video
+      const videoWidth = video.get(cv.CAP_PROP_FRAME_WIDTH);
+      const videoHeight = video.get(cv.CAP_PROP_FRAME_HEIGHT);
+      const videoFps = video.get(cv.CAP_PROP_FPS);
+      const videoTotalFrames = video.get(cv.CAP_PROP_FRAME_COUNT);
+      
+      console.log(`Video properties from capture: ${videoWidth}x${videoHeight} @ ${videoFps}fps, ${videoTotalFrames} frames`);
+      
+      // Use video properties if metadata is missing
+      const actualWidth = width || videoWidth;
+      const actualHeight = height || videoHeight;
+      const actualFps = fps || videoFps;
+      const actualTotalFrames = Math.floor(videoTotalFrames);
+      const actualCropWidth = Math.round(actualHeight * (9/16));
+      
+      // Get range of frames to process
+      const frameRange = parseFrameRange(range);
+      const startFrame = frameRange ? frameRange.startFrame : 0;
+      let endFrame = frameRange ? frameRange.endFrame : (actualTotalFrames - 1);
+      
+      if (isNaN(endFrame) || endFrame < 0 || endFrame >= actualTotalFrames) {
+        console.warn(`Invalid endFrame: ${endFrame}, using totalFrames from video: ${actualTotalFrames}`);
+        endFrame = actualTotalFrames - 1;
+      }
+      
+      console.log(`Processing frames ${startFrame} to ${endFrame} (total frames in video: ${actualTotalFrames})`);
+      
+      // Use FFmpeg instead of OpenCV's VideoWriter to avoid codec issues
+      // FFmpeg is more reliable for video encoding
+      console.log('Processing video frames and encoding with FFmpeg...');
+      
+      // Create a direct file-based approach instead of piping
+      // This is less error-prone and works more reliably
+      
+      // Create a temporary directory for frames
       const framesDir = path.join(outputTempDir, 'frames');
-      const processedFramesDir = path.join(outputTempDir, 'processed_frames');
-      
       if (!fs.existsSync(framesDir)) {
         fs.mkdirSync(framesDir, { recursive: true });
       }
       
-      if (!fs.existsSync(processedFramesDir)) {
-        fs.mkdirSync(processedFramesDir, { recursive: true });
-      }
-      
-      console.log('Processing video with frame-by-frame camera movement...');
-      console.log('Step 1: Extracting frames...');
-      
-      // Extract frames from the video - this stays the same, we extract all frames at once
-      await new Promise((resolve, reject) => {
-        ffmpeg(inputPath)
-          .outputOptions(['-vf', `fps=${fps}`])
-          // Use PNG for highest quality
-          .output(path.join(framesDir, 'frame-%04d.png'))
-          .on('end', () => {
-            console.log('Frames extracted successfully');
-            resolve();
-          })
-          .on('error', (err) => {
-            console.error('Error extracting frames:', err);
-            reject(err);
-          })
-          .run();
-      });
-      
-      // Get list of extracted frames
-      const frameFiles = fs.readdirSync(framesDir)
-        .filter(file => file.startsWith('frame-') && file.endsWith('.png'))
-        .sort((a, b) => {
-          const numA = parseInt(a.match(/frame-(\d+)/)[1]);
-          const numB = parseInt(b.match(/frame-(\d+)/)[1]);
-          return numA - numB;
-        });
-      
-      console.log(`Found ${frameFiles.length} frames to process`);
-      console.log('Step 2: Processing frames with camera movements using OpenCV...');
+      // For progress reporting
+      let processedFrames = 0;
+      const totalFramesToProcess = endFrame - startFrame + 1;
+      let lastProgressReport = Date.now();
       
       // For scene change detection
       let prevGrayFrame = null;
       
-      // Process frames in batches to be more efficient
-      for (let batchStart = 0; batchStart < Math.min(frameFiles.length, smoothedPositions.length); batchStart += BATCH_SIZE) {
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameFiles.length, smoothedPositions.length);
-        const batch = frameFiles.slice(batchStart, batchEnd);
-        
-        // Process each batch in parallel
-        await Promise.all(batch.map(async (frameFile, idx) => {
-          const frameIndex = batchStart + idx;
-          const normCenter = smoothedPositions[frameIndex];
-          
-          // Calculate crop parameters for this frame - same logic as before
-          const xCenter = Math.floor(normCenter * width);
-          let xStart = xCenter - Math.floor(cropWidth / 2);
-          
-          // Ensure crop stays within boundaries
-          if (xStart < 0) {
-            xStart = 0;
-          } else if (xStart + cropWidth > width) {
-            xStart = width - cropWidth;
-          }
-          
-          // Process the frame with OpenCV instead of spawning FFmpeg
-          try {
-            const frameMat = cv.imread(path.join(framesDir, frameFile), cv.IMREAD_COLOR);
-            
-            // Convert to grayscale for scene change detection
-            const grayFrame = frameMat.cvtColor(cv.COLOR_BGR2GRAY);
-            
-            // Calculate frame difference if we have a previous frame
-            let frameDiff = 0;
-            if (frameIndex > 0 && prevGrayFrame) {
-              frameDiff = mse(grayFrame, prevGrayFrame);
-              
-              // Log scene changes for debugging
-              if (frameDiff > SCENE_CHANGE_THRESHOLD) {
-                console.log(`Scene change detected at frame ${frameIndex} with diff ${frameDiff.toFixed(2)}`);
-              }
-            }
-            
-            // Store grayscale frame for next comparison (no need to manage memory with release)
-            prevGrayFrame = frameIndex === 0 || (frameIndex % BATCH_SIZE === BATCH_SIZE - 1) 
-              ? grayFrame 
-              : prevGrayFrame;
-            
-            // Create a region of interest for cropping
-            // Our test showed that getRegion with cv.Rect works
-            const croppedFrameMat = frameMat.getRegion(new cv.Rect(xStart, 0, cropWidth, height));
-            
-            // Check if we need to resize the output (if output dimensions are different from crop)
-            // Use defaults from crop dimensions if not specified in the analysis
-            const outputWidth = cropWidth;
-            const outputHeight = height;
-            
-            if (outputWidth !== cropWidth || outputHeight !== height) {
-              // Use standard resize method
-              const resizedMat = croppedFrameMat.resize(outputHeight, outputWidth);
-              cv.imwrite(path.join(processedFramesDir, frameFile), resizedMat);
-              // No need to call release as it doesn't exist
-            } else {
-              cv.imwrite(path.join(processedFramesDir, frameFile), croppedFrameMat);
-            }
-            
-            // No need for explicit memory management with release() as it's not available
-          } catch (err) {
-            console.error(`Error processing frame ${frameFile}:`, err);
-            throw err;
-          }
-        }));
-        
-        // Update progress after each batch
-        const progress = Math.floor((batchEnd / frameFiles.length) * 100);
-        console.log(`Processing frames: ${progress}%`);
-        fs.writeFileSync('progress.json', JSON.stringify({
-          progress,
-          status: `Processing frames: ${progress}%`
-        }, null, 2));
+      // Process frames
+      let currentFrame = 0;
+      
+      console.log('Reading and processing frames directly...');
+      
+      // Move to the starting frame
+      if (startFrame > 0) {
+        video.set(cv.CAP_PROP_POS_FRAMES, startFrame);
+        currentFrame = startFrame;
       }
       
-      console.log('Step 3: Combining processed frames into video...');
+      // Batch processing for better performance
+      const framePromises = [];
       
-      // Combine processed frames back into a video - one FFmpeg call instead of per-frame
+      while (true) {
+        // Read a frame from the video
+        const frame = video.read();
+        
+        // Check if we've reached the end of the video
+        if (frame.empty) {
+          console.log('Reached end of video');
+          break;
+        }
+        
+        // Stop if we've processed all required frames
+        if (currentFrame > endFrame) {
+          console.log('Reached end frame');
+          break;
+        }
+        
+        // Calculate the index in the smoothedPositions array
+        const positionIndex = currentFrame - startFrame;
+        
+        // Determine the center position (from analysis or default)
+        const normCenter = positionIndex < smoothedPositions.length
+          ? smoothedPositions[positionIndex]
+          : DEFAULT_CENTER;
+        
+        if (positionIndex >= smoothedPositions.length && processedFrames % 100 === 0) {
+          console.log(`Warning: No position data for frame ${currentFrame} (index ${positionIndex}), using default center`);
+        }
+        
+        // Calculate crop parameters for this frame
+        const xCenter = Math.floor(normCenter * actualWidth);
+        let xStart = xCenter - Math.floor(actualCropWidth / 2);
+        
+        // Ensure crop stays within boundaries
+        if (xStart < 0) {
+          xStart = 0;
+        } else if (xStart + actualCropWidth > actualWidth) {
+          xStart = actualWidth - actualCropWidth;
+        }
+        
+        // Convert to grayscale for scene change detection
+        const grayFrame = frame.cvtColor(cv.COLOR_BGR2GRAY);
+        
+        // Calculate frame difference if we have a previous frame
+        let frameDiff = 0;
+        if (prevGrayFrame) {
+          frameDiff = mse(grayFrame, prevGrayFrame);
+          
+          // Log scene changes for debugging
+          if (frameDiff > SCENE_CHANGE_THRESHOLD) {
+            console.log(`Scene change detected at frame ${currentFrame} with diff ${frameDiff.toFixed(2)}`);
+          }
+        }
+        
+        // Store grayscale frame for next comparison
+        prevGrayFrame = grayFrame;
+        
+        // Crop the frame
+        const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, actualHeight));
+        
+        // Save the frame to disk (async)
+        const framePath = path.join(framesDir, `frame-${String(processedFrames).padStart(8, '0')}.png`);
+        framePromises.push(
+          (async () => {
+            try {
+              await cv.imwriteAsync(framePath, croppedFrame);
+            } catch (err) {
+              console.error(`Error writing frame ${currentFrame} to ${framePath}:`, err);
+            }
+          })()
+        );
+        
+        // Process in batches to avoid too many open files
+        if (framePromises.length >= BATCH_SIZE) {
+          await Promise.all(framePromises);
+          framePromises.length = 0;
+        }
+        
+        // Update progress
+        processedFrames++;
+        currentFrame++;
+        
+        // Report progress periodically
+        const now = Date.now();
+        if (now - lastProgressReport > 1000) {
+          const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
+          console.log(`Processing frames: ${progress}%`);
+          fs.writeFileSync('progress.json', JSON.stringify({
+            progress,
+            status: `Processing frames: ${progress}%`
+          }, null, 2));
+          lastProgressReport = now;
+        }
+      }
+      
+      // Process any remaining frames
+      if (framePromises.length > 0) {
+        await Promise.all(framePromises);
+      }
+      
+      // Release resources
+      video.release();
+      
+      console.log('Combining frames into video...');
+      
+      // Use FFmpeg to combine frames into a video
+      const tempOutputPath = path.join(outputTempDir, 'temp_output.mp4');
+      
       await new Promise((resolve, reject) => {
         ffmpeg()
-          .input(path.join(processedFramesDir, 'frame-%04d.png'))
-          .inputOptions(['-framerate', fps.toString()])
+          .input(path.join(framesDir, 'frame-%08d.png'))
+          .inputOptions([
+            '-framerate', actualFps.toString()
+          ])
           .outputOptions([
             '-c:v', 'libx264',
+            '-preset', 'medium', // Balance between speed and compression
+            '-crf', '18',        // High quality (lower value = higher quality)
             '-pix_fmt', 'yuv420p'
           ])
-          .output(path.join(outputTempDir, 'video.mp4'))
+          .output(tempOutputPath)
           .on('end', resolve)
           .on('error', reject)
           .run();
       });
       
-      console.log('Step 4: Adding audio from original video...');
+      console.log('Adding audio from original video...');
       
-      // Add audio from the original video - this stays the same
+      // Add audio from the original video using FFmpeg
       await new Promise((resolve, reject) => {
         ffmpeg()
-          .input(path.join(outputTempDir, 'video.mp4'))
+          .input(tempOutputPath)
           .input(inputPath)
           .outputOptions([
             '-c:v', 'copy',
             '-c:a', 'aac',
             '-map', '0:v:0',
-            '-map', '1:a:0?'
+            '-map', '1:a:0?',
+            '-shortest'  // Ensures the output duration matches the video
           ])
           .output(outputPath)
           .on('end', () => {
-            console.log(`Processing complete: ${outputPath}`);
+            console.log(`Added audio to ${outputPath}`);
             resolve();
           })
           .on('error', (err) => {
@@ -515,19 +558,13 @@ async function processVideo(inputPath, outputs, analysis) {
           .run();
       });
       
-      // Clean up temporary files to save space
-      try {
-        fs.rmSync(framesDir, { recursive: true, force: true });
-        fs.rmSync(processedFramesDir, { recursive: true, force: true });
-        fs.unlinkSync(path.join(outputTempDir, 'video.mp4'));
-      } catch (err) {
-        console.warn('Warning: Could not clean up some temporary files', err);
-      }
+      console.log(`Completed processing output ${index + 1}`);
       
       return {
         outputPath,
-        status: 'completed',
-        frames: frameFiles.length
+        startFrame,
+        endFrame,
+        duration: ((endFrame - startFrame + 1) / actualFps).toFixed(2)
       };
     }));
     
