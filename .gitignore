@@ -138,5 +138,4 @@ dist
 # temp files
 temp/*
 node_modules/*
-node_modules/
 .DS_Store
