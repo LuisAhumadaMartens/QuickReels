@@ -448,6 +448,208 @@ function updateProgress(jobId, statusUpdate) {
   }
 }
 
+// Helper functions for processVideo
+/**
+ * Extract video metadata from analysis or directly from video file
+ * @param {Object} analysis - Analysis results 
+ * @param {Object} video - CV VideoCapture object
+ * @param {string} jobId - Processing job ID
+ * @returns {Object} Video metadata
+ */
+function extractVideoMetadata(analysis, video, jobId) {
+  // Get video metadata either from analysis or directly from video
+  let videoMetadata = {};
+  
+  if (analysis.metadata && 
+      analysis.metadata.width && 
+      analysis.metadata.height && 
+      analysis.metadata.fps) {
+    // Use metadata from analysis if complete
+    videoMetadata = analysis.metadata;
+    console.log(`Job ID [${jobId}]: Using metadata from analysis`);
+  } else {
+    // Get metadata directly from video file
+    videoMetadata = {
+      width: video.get(cv.CAP_PROP_FRAME_WIDTH),
+      height: video.get(cv.CAP_PROP_FRAME_HEIGHT),
+      fps: video.get(cv.CAP_PROP_FPS),
+      totalFrames: Math.floor(video.get(cv.CAP_PROP_FRAME_COUNT))
+    };
+    console.log(`Job ID [${jobId}]: Using metadata from video file`);
+  }
+  
+  return videoMetadata;
+}
+
+/**
+ * Process a single video frame
+ * @param {Object} frame - CV frame object
+ * @param {Object} options - Frame processing options
+ * @param {number} options.normCenter - Normalized center position
+ * @param {number} options.width - Video width
+ * @param {number} options.height - Video height
+ * @param {number} options.cropWidth - Width to crop
+ * @param {Object} options.prevGrayFrame - Previous grayscale frame for scene detection
+ * @param {number} options.currentFrame - Current frame number
+ * @param {string} options.jobId - Processing job ID
+ * @returns {Object} Processed frame data
+ */
+function processVideoFrame(frame, options) {
+  const { 
+    normCenter, 
+    width, 
+    height, 
+    cropWidth, 
+    prevGrayFrame, 
+    currentFrame,
+    jobId
+  } = options;
+  
+  // Calculate crop parameters for this frame
+  const xCenter = Math.floor(normCenter * width);
+  let xStart = xCenter - Math.floor(cropWidth / 2);
+  
+  // Ensure crop stays within boundaries
+  if (xStart < 0) {
+    xStart = 0;
+  } else if (xStart + cropWidth > width) {
+    xStart = width - cropWidth;
+  }
+  
+  // Convert to grayscale for scene change detection
+  const grayFrame = frame.cvtColor(cv.COLOR_BGR2GRAY);
+  
+  // Calculate frame difference if we have a previous frame
+  let frameDiff = 0;
+  if (prevGrayFrame) {
+    frameDiff = mse(grayFrame, prevGrayFrame);
+    
+    // Log scene changes
+    if (frameDiff > SCENE_CHANGE_THRESHOLD) {
+      console.log(`Job ID [${jobId}]: Scene change detected at frame ${currentFrame}`);
+    }
+  }
+  
+  // Crop the frame
+  const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, cropWidth, height));
+  
+  return {
+    croppedFrame,
+    grayFrame,
+    frameDiff
+  };
+}
+
+/**
+ * Encode video from processed frames
+ * @param {string} framesDir - Directory containing processed frames
+ * @param {string} outputPath - Path for output video
+ * @param {number} fps - Frames per second
+ * @param {Function} progressCallback - Callback for progress updates
+ * @returns {Promise<void>}
+ */
+async function encodeVideo(framesDir, outputPath, fps, progressCallback) {
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(path.join(framesDir, 'frame_%08d.png'))
+      .inputOptions([
+        '-framerate', fps.toString()
+      ])
+      .outputOptions([
+        '-c:v', 'libx264',
+        '-preset', 'medium', // Balance between speed and compression
+        '-crf', '18',        // High quality (lower value = higher quality)
+        '-pix_fmt', 'yuv420p'
+      ])
+      .output(outputPath)
+      .on('progress', (progress) => {
+        // FFmpeg reports progress as a percentage
+        if (progress.percent) {
+          const encodingProgress = progress.percent / 100;
+          // Update encoding phase progress via callback
+          progressCallback(encodingProgress);
+        }
+      })
+      .on('end', resolve)
+      .on('error', reject)
+      .run();
+  });
+}
+
+/**
+ * Add audio from original video to encoded video
+ * @param {string} videoPath - Path to encoded video without audio
+ * @param {string} audioSource - Path to audio source
+ * @param {string} outputPath - Path for final output with audio
+ * @param {Function} progressCallback - Callback for progress updates
+ * @returns {Promise<void>}
+ */
+async function addAudioToVideo(videoPath, audioSource, outputPath, progressCallback) {
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(videoPath)
+      .input(audioSource)
+      .outputOptions([
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-map', '0:v:0',
+        '-map', '1:a:0?',
+        '-shortest'  // Ensures the output duration matches the video
+      ])
+      .output(outputPath)
+      .on('progress', (progress) => {
+        if (progress.percent) {
+          const audioProgress = progress.percent / 100;
+          // Update audio merging phase progress via callback
+          progressCallback(audioProgress);
+        }
+      })
+      .on('end', resolve)
+      .on('error', (err) => {
+        reject(err);
+      })
+      .run();
+  });
+}
+
+/**
+ * Create required directories for processing
+ * @param {string} jobId - Processing job ID
+ * @param {Object} analysis - Analysis results
+ * @returns {Object} Paths for processing
+ */
+function setupDirectories(jobId, analysis) {
+  const projectRoot = process.cwd();
+  const tempBaseDir = path.join(projectRoot, 'temp');
+  const tempDir = analysis.tempDir || path.join(tempBaseDir, jobId);
+  const framesDir = path.join(tempDir, 'frames');
+  const processingFramesDir = path.join(framesDir, 'processing');
+  const tempInputPath = path.join(tempDir, 'input.mp4');
+  const tempOutputPath = path.join(tempDir, 'output.mp4');
+  
+  // Create all directories at once with recursive option
+  const dirsToCreate = [
+    tempBaseDir,
+    tempDir,
+    framesDir,
+    processingFramesDir
+  ];
+  
+  for (const dir of dirsToCreate) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+  
+  return {
+    tempDir,
+    framesDir,
+    processingFramesDir,
+    tempInputPath,
+    tempOutputPath
+  };
+}
+
 /**
  * Process a video based on analysis results
  * @param {string} inputPath - Path to the input video file
@@ -529,28 +731,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     return Math.floor(totalProgress * 100);
   }
   
-  // Create project-relative temp directory structure
-  const projectRoot = process.cwd();
-  const tempBaseDir = path.join(projectRoot, 'temp');
-  const tempDir = analysis.tempDir || path.join(tempBaseDir, processingId);
-  const framesDir = path.join(tempDir, 'frames');
-  const processingFramesDir = path.join(framesDir, 'processing');
-  const tempInputPath = path.join(tempDir, 'input.mp4');
-  const tempOutputPath = path.join(tempDir, 'output.mp4');
-  
-  // Create all directories at once with recursive option
-  const dirsToCreate = [
-    tempBaseDir,
-    tempDir,
-    framesDir,
-    processingFramesDir
-  ];
-  
-  for (const dir of dirsToCreate) {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  }
+  // Set up directories
+  const { 
+    tempDir, 
+    processingFramesDir, 
+    tempInputPath,
+    tempOutputPath
+  } = setupDirectories(processingId, analysis);
   
   // Update progress.json with job ID - analysis is complete, starting preparation
   updateProgress(processingId, {
@@ -567,29 +754,9 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Open the video file to get accurate properties
     const video = new cv.VideoCapture(tempInputPath);
     
-    // Step 2: Extract metadata - prefer analysis data but fallback to direct video properties
+    // Step 2: Extract metadata
+    const videoMetadata = extractVideoMetadata(analysis, video, processingId);
     const { smoothedPositions } = analysis;
-    
-    // Get video metadata either from analysis or directly from video
-    let videoMetadata = {};
-    
-    if (analysis.metadata && 
-        analysis.metadata.width && 
-        analysis.metadata.height && 
-        analysis.metadata.fps) {
-      // Use metadata from analysis if complete
-      videoMetadata = analysis.metadata;
-      console.log(`Job ID [${processingId}]: Using metadata from analysis`);
-    } else {
-      // Get metadata directly from video file
-      videoMetadata = {
-        width: video.get(cv.CAP_PROP_FRAME_WIDTH),
-        height: video.get(cv.CAP_PROP_FRAME_HEIGHT),
-        fps: video.get(cv.CAP_PROP_FPS),
-        totalFrames: Math.floor(video.get(cv.CAP_PROP_FRAME_COUNT))
-      };
-      console.log(`Job ID [${processingId}]: Using metadata from video file`);
-    }
     
     // Update progress - preparation phase halfway complete
     updatePhaseProgress('preparation', 0.5);
@@ -642,36 +809,19 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         ? smoothedPositions[positionIndex]
         : DEFAULT_CENTER;
       
-      // Calculate crop parameters for this frame
-      const xCenter = Math.floor(normCenter * width);
-      let xStart = xCenter - Math.floor(actualCropWidth / 2);
+      // Process the video frame
+      const { croppedFrame, grayFrame, frameDiff } = processVideoFrame(frame, {
+        normCenter,
+        width,
+        height,
+        cropWidth: actualCropWidth,
+        prevGrayFrame,
+        currentFrame,
+        jobId: processingId
+      });
       
-      // Ensure crop stays within boundaries
-      if (xStart < 0) {
-        xStart = 0;
-      } else if (xStart + actualCropWidth > width) {
-        xStart = width - actualCropWidth;
-      }
-      
-      // Convert to grayscale for scene change detection
-      const grayFrame = frame.cvtColor(cv.COLOR_BGR2GRAY);
-      
-      // Calculate frame difference if we have a previous frame
-      let frameDiff = 0;
-      if (prevGrayFrame) {
-        frameDiff = mse(grayFrame, prevGrayFrame);
-        
-        // Log scene changes
-        if (frameDiff > SCENE_CHANGE_THRESHOLD) {
-          console.log(`Job ID [${processingId}]: Scene change detected at frame ${currentFrame}`);
-        }
-      }
-      
-      // Store grayscale frame for next comparison
+      // Update previous frame for next comparison
       prevGrayFrame = grayFrame;
-      
-      // Crop the frame
-      const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, height));
       
       // Save the frame to disk (async)
       const framePath = path.join(processingFramesDir, `frame_${String(processedFrames).padStart(8, '0')}.png`);
@@ -719,34 +869,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     updatePhaseProgress('frameCropping', 1);
     updatePhaseProgress('encoding', 0);
     
-    // Use FFmpeg to combine frames into a video
-    await new Promise((resolve, reject) => {
-      let encodingProgress = 0;
-      
-      ffmpeg()
-        .input(path.join(processingFramesDir, 'frame_%08d.png'))
-        .inputOptions([
-          '-framerate', fps.toString()
-        ])
-        .outputOptions([
-          '-c:v', 'libx264',
-          '-preset', 'medium', // Balance between speed and compression
-          '-crf', '18',        // High quality (lower value = higher quality)
-          '-pix_fmt', 'yuv420p'
-        ])
-        .output(tempOutputPath)
-        .on('progress', (progress) => {
-          // FFmpeg reports progress as a percentage
-          if (progress.percent) {
-            encodingProgress = progress.percent / 100;
-            // Update encoding phase progress
-            updatePhaseProgress('encoding', Math.min(1, encodingProgress));
-          }
-        })
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
+    // Encode the video
+    await encodeVideo(
+      processingFramesDir, 
+      tempOutputPath, 
+      fps, 
+      progress => updatePhaseProgress('encoding', progress)
+    );
     
     // Encoding complete, starting audio merging
     updatePhaseProgress('encoding', 1);
@@ -758,48 +887,24 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
     
-    // Add audio from the original video using FFmpeg
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(tempOutputPath)
-        .input(tempInputPath)
-        .outputOptions([
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-map', '0:v:0',
-          '-map', '1:a:0?',
-          '-shortest'  // Ensures the output duration matches the video
-        ])
-        .output(outputPath)
-        .on('progress', (progress) => {
-          if (progress.percent) {
-            const audioProgress = progress.percent / 100;
-            // Update audio merging phase progress
-            updatePhaseProgress('audioMerging', Math.min(1, audioProgress));
-          }
-        })
-        .on('end', () => {
-          // Update progress to 100% when audio is added and file is saved
-          // Don't call updatePhaseProgress here to avoid duplicate logs
-          // Instead, set all final statuses in a single updateProgress call
-          updateProgress(processingId, {
-            encoding: { 
-              progress: 100,
-              status: "Encoding complete"
-            },
-            processing: {
-              progress: 100,
-              status: "Processing complete"
-            }
-          });
-          
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error(`Job ID [${processingId}]: Error adding audio: ${err.message}`);
-          reject(err);
-        })
-        .run();
+    // Add audio to the video
+    await addAudioToVideo(
+      tempOutputPath, 
+      tempInputPath, 
+      outputPath, 
+      progress => updatePhaseProgress('audioMerging', progress)
+    );
+    
+    // Update progress to 100% when audio is added and file is saved
+    updateProgress(processingId, {
+      encoding: { 
+        progress: 100,
+        status: "Encoding complete"
+      },
+      processing: {
+        progress: 100,
+        status: "Processing complete"
+      }
     });
     
     // Clean up temporary files
