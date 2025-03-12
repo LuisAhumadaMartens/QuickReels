@@ -366,47 +366,53 @@ function updateProgress(jobId, statusUpdate) {
     // Initialize job entry if it doesn't exist
     if (!progressData[jobId]) {
       progressData[jobId] = {
-        analysis: { progress: 0, status: "Not started" },
-        processing: { progress: 0, status: "Not started" },
+        status: "Initializing...",
+        analysis: 0,
+        processing: 0,
         videoGenerated: false
       };
     }
     
     // Update job data with the provided updates, but ensure progress never regresses
     if (statusUpdate.analysis) {
+      // Get the progress value
+      const newProgress = statusUpdate.analysis.progress;
+      
       // Only update progress if the new value is higher than the existing one
       // (unless it's an error state with progress = -1)
-      if (statusUpdate.analysis.progress === -1 || 
-          !progressData[jobId].analysis || 
-          statusUpdate.analysis.progress >= progressData[jobId].analysis.progress) {
-        progressData[jobId].analysis = {
-          ...progressData[jobId].analysis,
-          ...statusUpdate.analysis
-        };
-      } else {
-        // Only update the status text, keep the higher progress value
-        progressData[jobId].analysis.status = statusUpdate.analysis.status;
+      if (newProgress === -1 || newProgress >= progressData[jobId].analysis) {
+        progressData[jobId].analysis = newProgress;
+      }
+      
+      // Update the general status from analysis status
+      if (statusUpdate.analysis.status) {
+        progressData[jobId].status = statusUpdate.analysis.status;
       }
     }
     
     if (statusUpdate.processing) {
+      // Get the progress value
+      const newProgress = statusUpdate.processing.progress;
+      
       // Only update progress if the new value is higher than the existing one
       // (unless it's an error state with progress = -1)
-      if (statusUpdate.processing.progress === -1 || 
-          !progressData[jobId].processing || 
-          statusUpdate.processing.progress >= progressData[jobId].processing.progress) {
-        progressData[jobId].processing = {
-          ...progressData[jobId].processing,
-          ...statusUpdate.processing
-        };
-      } else {
-        // Only update the status text, keep the higher progress value
-        progressData[jobId].processing.status = statusUpdate.processing.status;
+      if (newProgress === -1 || newProgress >= progressData[jobId].processing) {
+        progressData[jobId].processing = newProgress;
+      }
+      
+      // Update the general status from processing status
+      if (statusUpdate.processing.status) {
+        progressData[jobId].status = statusUpdate.processing.status;
       }
     }
     
     if (statusUpdate.videoGenerated !== undefined) {
       progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
+      
+      // If video is generated, update the general status
+      if (statusUpdate.videoGenerated === true) {
+        progressData[jobId].status = "Video generation complete";
+      }
     }
     
     // If video is generated or there's an error, schedule removal
