@@ -429,17 +429,18 @@ function updateProgress(jobId, statusUpdate) {
         console.log(`Job ID [${jobId}]: ${statusUpdate.encoding.status}`);
       }
       
-      // If encoding is at 100%, we've completed the job (replacing videoGenerated flag)
-      if (newProgress === 100) {
+      // If encoding is at 100%, update the status but don't remove the job yet
+      // We'll let the audioMerging phase handle the job completion
+      if (newProgress === 100 && statusUpdate.encoding.status === "Encoding complete") {
+        // Only set the status, don't log it here to prevent duplication
         progressData[jobId].status = "Video generation complete";
-        console.log(`Job ID [${jobId}]: Video generation complete`);
       }
     }
     
-    // If encoding is at 100% or there's an error, schedule removal
-    if ((statusUpdate.encoding && statusUpdate.encoding.progress === 100) || 
+    // Only remove the job if explicitly told to do so with the "shouldRemoveJob" flag
+    // or if there's an error in processing
+    if ((statusUpdate.shouldRemoveJob) || 
         (statusUpdate.processing && statusUpdate.processing.status && statusUpdate.processing.status.startsWith("Error"))) {
-      // Immediately remove the job from progress.json instead of waiting
       try {
         // Write updated progress data first
         fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
@@ -514,7 +515,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     
     // Update progress with calculated percentage
     if (phase === 'encoding') {
-      // For encoding phase, update both the overall processing progress and the encoding progress
+      // For encoding phase, update both processing and encoding fields
       updateProgress(processingId, {
         processing: { 
           progress: overallPercentage,
@@ -525,8 +526,16 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           status: statusMessage
         }
       });
+    } else if (phase === 'frameCropping') {
+      // For frameCropping (which is the actual processing), use direct phase percentage
+      updateProgress(processingId, {
+        processing: { 
+          progress: phasePercentage,
+          status: statusMessage
+        }
+      });
     } else {
-      // For other phases, just update the processing progress
+      // For other phases, use the overall percentage
       updateProgress(processingId, {
         processing: { 
           progress: overallPercentage,
