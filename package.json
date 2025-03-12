@@ -1,38 +1,31 @@
 {
   "name": "quickreels",
-  "private": true,
-  "version": "0.0.1",
-  "type": "module",
+  "version": "1.0.0",
+  "main": "quickreels.js",
   "scripts": {
-    "dev": "concurrently \"vite\" \"python server.py\"",
-    "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview",
-    "server": "python server.py",
-    "client": "vite"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "description": "",
   "dependencies": {
-    "@types/react-input-mask": "^3.0.6",
-    "lucide-react": "^0.344.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-input-mask": "^2.0.4"
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@u4/opencv4nodejs": "^7.1.2",
+    "express": "^4.21.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.5",
+    "temp": "^0.9.4"
   },
-  "devDependencies": {
-    "@eslint/js": "^9.9.1",
-    "@types/react": "^18.3.5",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.4.18",
-    "concurrently": "^8.2.2",
-    "eslint": "^9.9.1",
-    "eslint-plugin-react-hooks": "^5.1.0-rc.0",
-    "eslint-plugin-react-refresh": "^0.4.11",
-    "globals": "^15.9.0",
-    "postcss": "^8.4.35",
-    "tailwindcss": "^3.4.1",
-    "typescript": "^5.5.3",
-    "typescript-eslint": "^8.3.0",
-    "vite": "^5.4.2"
+  "config": {
+    "port": 3000,
+    "detectionThreshold": 0.3,
+    "personClassId": 0,
+    "sceneChangeThreshold": 3000,
+    "defaultCenter": 0.5,
+    "moveNetInputSize": 192
   }
 }
