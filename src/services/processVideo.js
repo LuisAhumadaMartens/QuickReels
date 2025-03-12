@@ -469,66 +469,64 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     audioMerging: { weight: 0.05, description: "Adding audio" }
   };
   
-  // Function to update progress based on current phase and completion percentage
+  // Simplified progress tracking function
   function updatePhaseProgress(phase, phaseProgress = 1) {
-    // Calculate overall progress based on weights and current phase
+    const phaseInfo = processingPhases[phase];
+    if (!phaseInfo) return 0;
+    
+    // Calculate percentage for this phase
+    const phasePercentage = Math.floor(phaseProgress * 100);
+    
+    // Create the status message
+    let statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
+    if (phase === 'audioMerging' && phaseProgress === 1) {
+      statusMessage = "Processing complete";
+    }
+    
+    // Determine which progress fields to update
+    const progressUpdate = {
+      processing: { 
+        status: statusMessage
+      }
+    };
+    
+    // Special handling for different phases
+    if (phase === 'frameCropping') {
+      // For frameCropping, use direct percentage for processing
+      progressUpdate.processing.progress = phasePercentage;
+    } else if (phase === 'encoding') {
+      // For encoding, update both fields
+      progressUpdate.processing.progress = calculateOverallProgress(phase, phaseProgress);
+      progressUpdate.encoding = {
+        progress: phasePercentage,
+        status: statusMessage
+      };
+    } else {
+      // For other phases, use weighted overall progress
+      progressUpdate.processing.progress = calculateOverallProgress(phase, phaseProgress);
+    }
+    
+    // Update progress
+    updateProgress(processingId, progressUpdate);
+    
+    return progressUpdate.processing.progress;
+  }
+  
+  // Helper to calculate overall weighted progress
+  function calculateOverallProgress(currentPhase, currentProgress) {
     let totalProgress = 0;
     let phaseFound = false;
     
     for (const [phaseName, phaseInfo] of Object.entries(processingPhases)) {
-      if (phaseName === phase) {
-        totalProgress += phaseInfo.weight * phaseProgress;
+      if (phaseName === currentPhase) {
+        totalProgress += phaseInfo.weight * currentProgress;
         phaseFound = true;
       } else if (!phaseFound) {
         totalProgress += phaseInfo.weight; // Add 100% for completed phases
       }
     }
     
-    // Calculate the overall percentage (0-100)
-    const overallPercentage = Math.floor(totalProgress * 100);
-    
-    // Get the phase description and percent for status message
-    const phaseInfo = processingPhases[phase];
-    const phasePercentage = Math.floor(phaseProgress * 100);
-    let statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
-    
-    // Special case for 100% completion
-    if (phase === 'audioMerging' && phaseProgress === 1) {
-      statusMessage = "Processing complete";
-    }
-    
-    // Update progress with calculated percentage
-    if (phase === 'encoding') {
-      // For encoding phase, update both processing and encoding fields
-      updateProgress(processingId, {
-        processing: { 
-          progress: overallPercentage,
-          status: statusMessage
-        },
-        encoding: {
-          progress: phasePercentage,
-          status: statusMessage
-        }
-      });
-    } else if (phase === 'frameCropping') {
-      // For frameCropping (which is the actual processing), use direct phase percentage
-      updateProgress(processingId, {
-        processing: { 
-          progress: phasePercentage,
-          status: statusMessage
-        }
-      });
-    } else {
-      // For other phases, use the overall percentage
-      updateProgress(processingId, {
-        processing: { 
-          progress: overallPercentage,
-          status: statusMessage
-        }
-      });
-    }
-    
-    return overallPercentage;
+    return Math.floor(totalProgress * 100);
   }
   
   // Create project-relative temp directory structure
@@ -540,18 +538,18 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   const tempInputPath = path.join(tempDir, 'input.mp4');
   const tempOutputPath = path.join(tempDir, 'output.mp4');
   
-  // Create directories if they don't exist yet
-  if (!fs.existsSync(tempBaseDir)) {
-    fs.mkdirSync(tempBaseDir, { recursive: true });
-  }
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
-  if (!fs.existsSync(framesDir)) {
-    fs.mkdirSync(framesDir, { recursive: true });
-  }
-  if (!fs.existsSync(processingFramesDir)) {
-    fs.mkdirSync(processingFramesDir, { recursive: true });
+  // Create all directories at once with recursive option
+  const dirsToCreate = [
+    tempBaseDir,
+    tempDir,
+    framesDir,
+    processingFramesDir
+  ];
+  
+  for (const dir of dirsToCreate) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
   }
   
   // Update progress.json with job ID - analysis is complete, starting preparation
@@ -566,35 +564,43 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       fs.copyFileSync(inputPath, tempInputPath);
     }
     
-    // Step 2: Extract metadata and positions from analysis
-    const { metadata, smoothedPositions } = analysis;
-    const { width, height, fps } = metadata || {};
+    // Open the video file to get accurate properties
+    const video = new cv.VideoCapture(tempInputPath);
+    
+    // Step 2: Extract metadata - prefer analysis data but fallback to direct video properties
+    const { smoothedPositions } = analysis;
+    
+    // Get video metadata either from analysis or directly from video
+    let videoMetadata = {};
+    
+    if (analysis.metadata && 
+        analysis.metadata.width && 
+        analysis.metadata.height && 
+        analysis.metadata.fps) {
+      // Use metadata from analysis if complete
+      videoMetadata = analysis.metadata;
+      console.log(`Job ID [${processingId}]: Using metadata from analysis`);
+    } else {
+      // Get metadata directly from video file
+      videoMetadata = {
+        width: video.get(cv.CAP_PROP_FRAME_WIDTH),
+        height: video.get(cv.CAP_PROP_FRAME_HEIGHT),
+        fps: video.get(cv.CAP_PROP_FPS),
+        totalFrames: Math.floor(video.get(cv.CAP_PROP_FRAME_COUNT))
+      };
+      console.log(`Job ID [${processingId}]: Using metadata from video file`);
+    }
     
     // Update progress - preparation phase halfway complete
     updatePhaseProgress('preparation', 0.5);
     
     // Calculate crop dimensions for 9:16 aspect ratio
-    const initialCropWidth = height ? Math.round(height * (9/16)) : 0;
-    
-    // Open the video file to get accurate properties
-    const video = new cv.VideoCapture(tempInputPath);
-    
-    // Get video properties directly from the video
-    const videoWidth = video.get(cv.CAP_PROP_FRAME_WIDTH);
-    const videoHeight = video.get(cv.CAP_PROP_FRAME_HEIGHT);
-    const videoFps = video.get(cv.CAP_PROP_FPS);
-    const videoTotalFrames = video.get(cv.CAP_PROP_FRAME_COUNT);
-    
-    // Use video properties if metadata is missing
-    const actualWidth = width || videoWidth;
-    const actualHeight = height || videoHeight;
-    const actualFps = fps || videoFps;
-    const actualTotalFrames = Math.floor(videoTotalFrames);
-    const actualCropWidth = Math.round(actualHeight * (9/16));
+    const { width, height, fps, totalFrames } = videoMetadata;
+    const actualCropWidth = Math.round(height * ASPECT_RATIO);
     
     // Process the entire video
     const startFrame = 0;
-    const endFrame = actualTotalFrames - 1;
+    const endFrame = totalFrames - 1 || Math.floor(video.get(cv.CAP_PROP_FRAME_COUNT)) - 1;
     
     // For progress reporting
     let processedFrames = 0;
@@ -637,14 +643,14 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         : DEFAULT_CENTER;
       
       // Calculate crop parameters for this frame
-      const xCenter = Math.floor(normCenter * actualWidth);
+      const xCenter = Math.floor(normCenter * width);
       let xStart = xCenter - Math.floor(actualCropWidth / 2);
       
       // Ensure crop stays within boundaries
       if (xStart < 0) {
         xStart = 0;
-      } else if (xStart + actualCropWidth > actualWidth) {
-        xStart = actualWidth - actualCropWidth;
+      } else if (xStart + actualCropWidth > width) {
+        xStart = width - actualCropWidth;
       }
       
       // Convert to grayscale for scene change detection
@@ -665,7 +671,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       prevGrayFrame = grayFrame;
       
       // Crop the frame
-      const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, actualHeight));
+      const croppedFrame = frame.getRegion(new cv.Rect(xStart, 0, actualCropWidth, height));
       
       // Save the frame to disk (async)
       const framePath = path.join(processingFramesDir, `frame_${String(processedFrames).padStart(8, '0')}.png`);
@@ -720,7 +726,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       ffmpeg()
         .input(path.join(processingFramesDir, 'frame_%08d.png'))
         .inputOptions([
-          '-framerate', actualFps.toString()
+          '-framerate', fps.toString()
         ])
         .outputOptions([
           '-c:v', 'libx264',
@@ -806,7 +812,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     return {
       jobId: processingId,
       outputPath,
-      duration: ((endFrame - startFrame + 1) / actualFps).toFixed(2),
+      duration: ((endFrame - startFrame + 1) / fps).toFixed(2),
       status: 'completed'
     };
   } catch (error) {
