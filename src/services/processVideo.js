@@ -460,6 +460,53 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   const processingId = analysis.jobId || jobId || generateRandomId();
   console.log(`Job ID [${processingId}]: Processing video`);
   
+  // Define processing phases with weighted percentages
+  const processingPhases = {
+    preparation: { weight: 0.05, description: "Preparing for processing" },
+    frameCropping: { weight: 0.70, description: "Processing frames" },
+    encoding: { weight: 0.20, description: "Encoding video" },
+    audioMerging: { weight: 0.05, description: "Adding audio" }
+  };
+  
+  // Function to update progress based on current phase and completion percentage
+  function updatePhaseProgress(phase, phaseProgress = 1) {
+    // Calculate overall progress based on weights and current phase
+    let totalProgress = 0;
+    let phaseFound = false;
+    
+    for (const [phaseName, phaseInfo] of Object.entries(processingPhases)) {
+      if (phaseName === phase) {
+        totalProgress += phaseInfo.weight * phaseProgress;
+        phaseFound = true;
+      } else if (!phaseFound) {
+        totalProgress += phaseInfo.weight; // Add 100% for completed phases
+      }
+    }
+    
+    // Calculate the overall percentage (0-100)
+    const overallPercentage = Math.floor(totalProgress * 100);
+    
+    // Get the phase description and percent for status message
+    const phaseInfo = processingPhases[phase];
+    const phasePercentage = Math.floor(phaseProgress * 100);
+    let statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
+    
+    // Special case for 100% completion
+    if (phase === 'audioMerging' && phaseProgress === 1) {
+      statusMessage = "Processing complete";
+    }
+    
+    // Update progress with calculated percentage
+    updateProgress(processingId, {
+      processing: { 
+        progress: overallPercentage,
+        status: statusMessage
+      }
+    });
+    
+    return overallPercentage;
+  }
+  
   // Create project-relative temp directory structure
   const projectRoot = process.cwd();
   const tempBaseDir = path.join(projectRoot, 'temp');
@@ -483,11 +530,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     fs.mkdirSync(processingFramesDir, { recursive: true });
   }
   
-  // Update progress.json with job ID
+  // Update progress.json with job ID - analysis is complete, starting preparation
   updateProgress(processingId, {
-    analysis: { progress: 100, status: "Analysis complete" },
-    processing: { progress: 0, status: "Copying input file..." }
+    analysis: { progress: 100, status: "Analysis complete" }
   });
+  updatePhaseProgress('preparation', 0);
   
   try {
     // Step 1: Copy input file to temp directory if not already there
@@ -499,10 +546,8 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     const { metadata, smoothedPositions } = analysis;
     const { width, height, fps } = metadata || {};
     
-    // Update progress
-    updateProgress(processingId, {
-      processing: { progress: 10, status: "Starting video processing..." }
-    });
+    // Update progress - preparation phase halfway complete
+    updatePhaseProgress('preparation', 0.5);
     
     // Calculate crop dimensions for 9:16 aspect ratio
     const initialCropWidth = height ? Math.round(height * (9/16)) : 0;
@@ -538,10 +583,9 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Process frames
     let currentFrame = 0;
     
-    // Update progress
-    updateProgress(processingId, {
-      processing: { progress: 20, status: "Processing frames..." }
-    });
+    // Preparation phase complete, starting frame processing
+    updatePhaseProgress('preparation', 1);
+    updatePhaseProgress('frameCropping', 0);
     
     // Batch processing for better performance
     const framePromises = [];
@@ -624,14 +668,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       // Report progress periodically
       const now = Date.now();
       if (now - lastProgressReport > 1000) {
-        const progress = Math.floor((processedFrames / totalFramesToProcess) * 100);
-        // Update progress in the progress.json file
-        updateProgress(processingId, {
-          processing: { 
-            progress: Math.min(95, progress), // Cap at 95% to leave room for encoding
-            status: `Processing frames: ${progress}%` 
-          }
-        });
+        // Calculate frame cropping phase progress (0-1)
+        const framesProgress = processedFrames / totalFramesToProcess;
+        
+        // Update progress using the phase-based calculation
+        updatePhaseProgress('frameCropping', framesProgress);
         lastProgressReport = now;
       }
     }
@@ -644,13 +685,14 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Release resources
     video.release();
     
-    // Update progress for encoding phase
-    updateProgress(processingId, {
-      processing: { progress: 95, status: "Encoding video..." }
-    });
+    // Frame cropping complete, starting encoding
+    updatePhaseProgress('frameCropping', 1);
+    updatePhaseProgress('encoding', 0);
     
     // Use FFmpeg to combine frames into a video
     await new Promise((resolve, reject) => {
+      let encodingProgress = 0;
+      
       ffmpeg()
         .input(path.join(processingFramesDir, 'frame_%08d.png'))
         .inputOptions([
@@ -663,15 +705,22 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           '-pix_fmt', 'yuv420p'
         ])
         .output(tempOutputPath)
+        .on('progress', (progress) => {
+          // FFmpeg reports progress as a percentage
+          if (progress.percent) {
+            encodingProgress = progress.percent / 100;
+            // Update encoding phase progress
+            updatePhaseProgress('encoding', Math.min(1, encodingProgress));
+          }
+        })
         .on('end', resolve)
         .on('error', reject)
         .run();
     });
     
-    // Update progress for audio phase
-    updateProgress(processingId, {
-      processing: { progress: 98, status: "Adding audio..." }
-    });
+    // Encoding complete, starting audio merging
+    updatePhaseProgress('encoding', 1);
+    updatePhaseProgress('audioMerging', 0);
     
     // Create output directory if it doesn't exist
     const outputDir = path.dirname(outputPath);
@@ -692,10 +741,17 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           '-shortest'  // Ensures the output duration matches the video
         ])
         .output(outputPath)
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            const audioProgress = progress.percent / 100;
+            // Update audio merging phase progress
+            updatePhaseProgress('audioMerging', Math.min(1, audioProgress));
+          }
+        })
         .on('end', () => {
           // Update progress to 100% when audio is added and file is saved
+          updatePhaseProgress('audioMerging', 1);
           updateProgress(processingId, {
-            processing: { progress: 100, status: "Processing complete" },
             videoGenerated: true
           });
           
