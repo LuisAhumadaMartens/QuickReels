@@ -343,6 +343,9 @@ class MovementPlanner {
   }
 }
 
+// Keep track of completed jobs to prevent duplicate updates
+const completedJobs = new Set();
+
 /**
  * Update the progress tracking file with job status
  * @param {string} jobId - The job ID
@@ -359,6 +362,11 @@ class MovementPlanner {
  */
 function updateProgress(jobId, statusUpdate) {
   try {
+    // If the job has been marked as completed, ignore further updates
+    if (completedJobs.has(jobId)) {
+      return;
+    }
+
     // Read existing progress data
     let progressData = {};
     if (fs.existsSync('progress.json')) {
@@ -428,24 +436,44 @@ function updateProgress(jobId, statusUpdate) {
         // Log the status update to console with the job ID
         console.log(`Job ID [${jobId}]: ${statusUpdate.encoding.status}`);
       }
-      
-      // If encoding is at 100%, update the status but don't remove the job yet
-      // We'll let the audioMerging phase handle the job completion
-      if (newProgress === 100 && statusUpdate.encoding.status === "Encoding complete") {
-        // Only set the status, don't log it here to prevent duplication
-        progressData[jobId].status = "Video generation complete";
-      }
     }
     
-    // Only remove the job if explicitly told to do so with the "shouldRemoveJob" flag
-    // or if there's an error in processing
-    if ((statusUpdate.shouldRemoveJob) || 
-        (statusUpdate.processing && statusUpdate.processing.status && statusUpdate.processing.status.startsWith("Error"))) {
+    // Check for job completion - only if we have a specific "Processing complete" status
+    // This ensures we only mark as complete at the very end after audio merging
+    if (statusUpdate.processing && 
+        statusUpdate.processing.status && 
+        statusUpdate.processing.status === "Processing complete") {
+      // This is the final step, so mark job as complete and remove from tracking
+      progressData[jobId].status = "Video generation complete";
+      console.log(`Job ID [${jobId}]: Video generation complete`);
+      
+      // Write updated progress data first
+      fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+      
+      console.log(`Job ID [${jobId}]: Job completed, removed from tracking`);
+      
+      // Add to the completed jobs set
+      completedJobs.add(jobId);
+      
+      // Immediately delete the entry from progress.json
+      delete progressData[jobId];
+      fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+      
+      return; // Skip the regular write since we've already written the file
+    }
+    
+    // For error conditions, still remove the job
+    if (statusUpdate.processing && 
+        statusUpdate.processing.status && 
+        statusUpdate.processing.status.startsWith("Error")) {
       try {
         // Write updated progress data first
         fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
         
-        console.log(`Job ID [${jobId}]: Job completed, removed from tracking`);
+        console.log(`Job ID [${jobId}]: Job completed with error, removed from tracking`);
+        
+        // Add to the completed jobs set
+        completedJobs.add(jobId);
         
         // Immediately delete the entry from progress.json
         delete progressData[jobId];
@@ -790,11 +818,16 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
         })
         .on('end', () => {
           // Update progress to 100% when audio is added and file is saved
-          updatePhaseProgress('audioMerging', 1);
+          // Don't call updatePhaseProgress here to avoid duplicate logs
+          // Instead, set all final statuses in a single updateProgress call
           updateProgress(processingId, {
             encoding: { 
               progress: 100,
               status: "Encoding complete"
+            },
+            processing: {
+              progress: 100,
+              status: "Processing complete"
             }
           });
           
