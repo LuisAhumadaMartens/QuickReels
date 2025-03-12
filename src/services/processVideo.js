@@ -353,7 +353,9 @@ class MovementPlanner {
  * @param {Object} [statusUpdate.processing] - Processing status update
  * @param {number} [statusUpdate.processing.progress] - Processing progress (0-100)
  * @param {string} [statusUpdate.processing.status] - Processing status message
- * @param {boolean} [statusUpdate.videoGenerated] - Whether the video has been generated
+ * @param {Object} [statusUpdate.encoding] - Encoding status update
+ * @param {number} [statusUpdate.encoding.progress] - Encoding progress (0-100)
+ * @param {string} [statusUpdate.encoding.status] - Encoding status message
  */
 function updateProgress(jobId, statusUpdate) {
   try {
@@ -369,7 +371,7 @@ function updateProgress(jobId, statusUpdate) {
         status: "Initializing...",
         analysis: 0,
         processing: 0,
-        videoGenerated: false
+        encoding: 0
       };
     }
     
@@ -410,18 +412,32 @@ function updateProgress(jobId, statusUpdate) {
       }
     }
     
-    if (statusUpdate.videoGenerated !== undefined) {
-      progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
+    if (statusUpdate.encoding) {
+      // Get the progress value
+      const newProgress = statusUpdate.encoding.progress;
       
-      // If video is generated, update the general status
-      if (statusUpdate.videoGenerated === true) {
+      // Only update progress if the new value is higher than the existing one
+      // (unless it's an error state with progress = -1)
+      if (newProgress === -1 || newProgress >= progressData[jobId].encoding) {
+        progressData[jobId].encoding = newProgress;
+      }
+      
+      // Update the general status from encoding status
+      if (statusUpdate.encoding.status) {
+        progressData[jobId].status = statusUpdate.encoding.status;
+        // Log the status update to console with the job ID
+        console.log(`Job ID [${jobId}]: ${statusUpdate.encoding.status}`);
+      }
+      
+      // If encoding is at 100%, we've completed the job (replacing videoGenerated flag)
+      if (newProgress === 100) {
         progressData[jobId].status = "Video generation complete";
         console.log(`Job ID [${jobId}]: Video generation complete`);
       }
     }
     
-    // If video is generated or there's an error, schedule removal
-    if (statusUpdate.videoGenerated === true || 
+    // If encoding is at 100% or there's an error, schedule removal
+    if ((statusUpdate.encoding && statusUpdate.encoding.progress === 100) || 
         (statusUpdate.processing && statusUpdate.processing.status && statusUpdate.processing.status.startsWith("Error"))) {
       // Immediately remove the job from progress.json instead of waiting
       try {
@@ -752,7 +768,10 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           // Update progress to 100% when audio is added and file is saved
           updatePhaseProgress('audioMerging', 1);
           updateProgress(processingId, {
-            videoGenerated: true
+            encoding: { 
+              progress: 100,
+              status: "Encoding complete"
+            }
           });
           
           resolve();
