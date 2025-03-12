@@ -47,10 +47,10 @@ function mse(imageA, imageB) {
  */
 class MovementPlanner {
   constructor(fps) {
-    // Optimized data structures
-    this.framePositions = new Map(); // frameNum -> [x_pos, is_scene_change]
-    this.sceneChanges = new Set(); // Set of frameNums that are scene changes
-    this.frameOrder = []; // Ordered list of processed frames for faster iteration
+    // Simplified data structure: single Map for all frame data
+    // frameData: Map<frameNum, {position: number, isSceneChange: boolean}>
+    this.frameData = new Map();
+    this.frameOrder = []; // Keep this for ordered iteration
     
     // Cache for optimized segment retrieval
     this.segmentsCache = null;
@@ -64,11 +64,9 @@ class MovementPlanner {
     this.smoothingRate = 0.05;
     this.maxMovementPerFrame = 0.03;
     
-    // Use circular buffer for position history
-    this.positionHistoryBuffer = new Array(3).fill(0);
-    this.positionHistoryIndex = 0;
-    this.positionHistoryCount = 0;
-    this.historySize = 3;
+    // Simplified position history: just use a fixed-size array
+    this.positionHistory = [];
+    this.historyMaxSize = 3;
     
     this.centeringWeight = 0.4;
     this.fastTransitionThreshold = 0.1;
@@ -82,14 +80,14 @@ class MovementPlanner {
   }
 
   /**
-   * Add position to circular buffer
+   * Add position to history, maintaining the maximum size
    * @private
    */
-  _addToPositionHistory(position) {
-    this.positionHistoryBuffer[this.positionHistoryIndex] = position;
-    this.positionHistoryIndex = (this.positionHistoryIndex + 1) % this.historySize;
-    if (this.positionHistoryCount < this.historySize) {
-      this.positionHistoryCount++;
+  _updatePositionHistory(position) {
+    // Add to history and keep only the most recent entries
+    this.positionHistory.push(position);
+    if (this.positionHistory.length > this.historyMaxSize) {
+      this.positionHistory.shift(); // Remove oldest entry
     }
   }
 
@@ -98,23 +96,18 @@ class MovementPlanner {
    * @private
    */
   _getPositionHistoryAverage() {
-    if (this.positionHistoryCount === 0) return this.defaultX;
+    if (this.positionHistory.length === 0) return this.defaultX;
     
-    let sum = 0;
-    for (let i = 0; i < this.positionHistoryCount; i++) {
-      sum += this.positionHistoryBuffer[i];
-    }
-    return sum / this.positionHistoryCount;
+    const sum = this.positionHistory.reduce((acc, pos) => acc + pos, 0);
+    return sum / this.positionHistory.length;
   }
 
   /**
-   * Reset position history buffer
+   * Reset position history
    * @private
    */
   _resetPositionHistory() {
-    this.positionHistoryBuffer.fill(0);
-    this.positionHistoryIndex = 0;
-    this.positionHistoryCount = 0;
+    this.positionHistory = [];
   }
 
   /**
@@ -124,7 +117,7 @@ class MovementPlanner {
   _getLastPosition() {
     if (this.frameOrder.length === 0) return this.defaultX;
     const lastFrame = this.frameOrder[this.frameOrder.length - 1];
-    return this.framePositions.get(lastFrame)[0];
+    return this.frameData.get(lastFrame).position;
   }
 
   /**
@@ -143,8 +136,7 @@ class MovementPlanner {
       this.isCentering = false;
       
       // Store scene change data
-      this.framePositions.set(frameNum, [this.defaultX, true]);
-      this.sceneChanges.add(frameNum);
+      this.frameData.set(frameNum, { position: this.defaultX, isSceneChange: true });
       this.frameOrder.push(frameNum);
       
       this.currentSceneStart = frameNum;
@@ -157,13 +149,18 @@ class MovementPlanner {
       // Found first detection after scene change
       const newX = cluster[1];  // Normalized x position from cluster
       
-      // Update all frames since scene change (more efficient with Map)
+      // Update all frames since scene change
       for (const fNum of this.frameOrder) {
         if (fNum >= this.currentSceneStart) {
-          const [_, isScene] = this.framePositions.get(fNum);
-          if (isScene) continue;  // Keep scene change marker
+          const frameData = this.frameData.get(fNum);
+          // Skip scene change frames
+          if (frameData.isSceneChange) continue;  
           
-          this.framePositions.set(fNum, [newX, false]);
+          // Update position
+          this.frameData.set(fNum, { 
+            position: newX, 
+            isSceneChange: false 
+          });
         }
       }
       
@@ -171,7 +168,7 @@ class MovementPlanner {
       return;
     }
 
-    // Get the target position (optimized lookups)
+    // Get the target position
     let targetX;
     if (cluster) {
       targetX = cluster[1];
@@ -190,7 +187,7 @@ class MovementPlanner {
         targetX = lastX + (movement > 0 ? maxMove : -maxMove);
       }
 
-      // Check if we're within the delta threshold for stability (early exit possible)
+      // Check if we're within the delta threshold for stability
       if (distanceToTarget < this.fastTransitionThreshold) {
         this.stableFrames++;
         if (this.stableFrames >= this.stableFramesRequired) {
@@ -202,11 +199,11 @@ class MovementPlanner {
         this._resetPositionHistory();
       }
 
-      // Apply centering after stable period (optimized buffer operations)
+      // Apply centering after stable period
       if (this.isCentering) {
-        this._addToPositionHistory(targetX);
+        this._updatePositionHistory(targetX);
 
-        if (this.positionHistoryCount > 1) {
+        if (this.positionHistory.length > 1) {
           const avgPos = this._getPositionHistoryAverage();
           targetX = targetX * (1 - this.centeringWeight) + avgPos * this.centeringWeight;
         }
@@ -214,7 +211,7 @@ class MovementPlanner {
     }
 
     // Store frame data
-    this.framePositions.set(frameNum, [targetX, false]);
+    this.frameData.set(frameNum, { position: targetX, isSceneChange: false });
     this.frameOrder.push(frameNum);
   }
 
@@ -232,16 +229,16 @@ class MovementPlanner {
     let currentPositions = [];
     let lastFrameNum = -1;
 
-    // Optimize iteration by using ordered frameOrder array
+    // Iterate through frames in order
     for (const frameNum of this.frameOrder) {
-      const [xPos, isScene] = this.framePositions.get(frameNum);
+      const { position, isSceneChange } = this.frameData.get(frameNum);
       
       // Check if this is the first frame
       if (lastFrameNum === -1) {
         currentSegmentStart = frameNum;
       }
       // Check for scene change
-      else if (isScene) {
+      else if (isSceneChange) {
         // End current segment
         segments.push([
           currentSegmentStart,
@@ -253,7 +250,7 @@ class MovementPlanner {
         currentPositions = [];
       }
       
-      currentPositions.push(xPos);
+      currentPositions.push(position);
       lastFrameNum = frameNum;
     }
 
@@ -331,8 +328,8 @@ class MovementPlanner {
     const originalFrameData = [];
     
     for (const frameNum of this.frameOrder) {
-      const [xPos, isScene] = this.framePositions.get(frameNum);
-      originalFrameData.push([frameNum, xPos, isScene]);
+      const { position, isSceneChange } = this.frameData.get(frameNum);
+      originalFrameData.push([frameNum, position, isSceneChange]);
     }
     
     return originalFrameData;
@@ -363,10 +360,12 @@ function updateProgress(jobId, statusUpdate) {
       return;
     }
 
-    // Read existing progress data
+    // Read existing progress data once
     let progressData = {};
-    if (fs.existsSync('progress.json')) {
-      progressData = JSON.parse(fs.readFileSync('progress.json', 'utf-8'));
+    const progressFilePath = 'progress.json';
+    
+    if (fs.existsSync(progressFilePath)) {
+      progressData = JSON.parse(fs.readFileSync(progressFilePath, 'utf-8'));
     }
     
     // Initialize job entry if it doesn't exist
@@ -379,110 +378,71 @@ function updateProgress(jobId, statusUpdate) {
       };
     }
     
-    // Update job data with the provided updates, but ensure progress never regresses
-    if (statusUpdate.analysis) {
-      // Get the progress value
-      const newProgress = statusUpdate.analysis.progress;
+    // Generalized function to update a specific phase
+    const updatePhase = (phase, phaseUpdate) => {
+      if (!phaseUpdate) return false;
       
-      // Only update progress if the new value is higher than the existing one
-      // (unless it's an error state with progress = -1)
-      if (newProgress === -1 || newProgress >= progressData[jobId].analysis) {
-        progressData[jobId].analysis = newProgress;
+      let wasUpdated = false;
+      
+      // Update progress if provided and higher than current (or error state)
+      if (phaseUpdate.progress !== undefined) {
+        const newProgress = phaseUpdate.progress;
+        if (newProgress === -1 || newProgress >= progressData[jobId][phase]) {
+          progressData[jobId][phase] = newProgress;
+          wasUpdated = true;
+        }
       }
       
-      // Update the general status from analysis status
-      if (statusUpdate.analysis.status) {
-        progressData[jobId].status = statusUpdate.analysis.status;
-        // Log the status update to console with the job ID
-        console.log(`Job ID [${jobId}]: ${statusUpdate.analysis.status}`);
+      // Update status message if provided
+      if (phaseUpdate.status) {
+        progressData[jobId].status = phaseUpdate.status;
+        console.log(`Job ID [${jobId}]: ${phaseUpdate.status}`);
+        wasUpdated = true;
       }
-    }
+      
+      return wasUpdated;
+    };
     
-    if (statusUpdate.processing) {
-      // Get the progress value
-      const newProgress = statusUpdate.processing.progress;
-      
-      // Only update progress if the new value is higher than the existing one
-      // (unless it's an error state with progress = -1)
-      if (newProgress === -1 || newProgress >= progressData[jobId].processing) {
-        progressData[jobId].processing = newProgress;
-      }
-      
-      // Update the general status from processing status
-      if (statusUpdate.processing.status) {
-        progressData[jobId].status = statusUpdate.processing.status;
-        // Log the status update to console with the job ID
-        console.log(`Job ID [${jobId}]: ${statusUpdate.processing.status}`);
-      }
-    }
+    // Update each phase if needed
+    const analysisUpdated = updatePhase('analysis', statusUpdate.analysis);
+    const processingUpdated = updatePhase('processing', statusUpdate.processing);
+    const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
     
-    if (statusUpdate.encoding) {
-      // Get the progress value
-      const newProgress = statusUpdate.encoding.progress;
+    // Only write to file if anything changed
+    if (analysisUpdated || processingUpdated || encodingUpdated) {
+      // Check for completion conditions
+      const isComplete = statusUpdate.processing && 
+                         statusUpdate.processing.status === "Processing complete";
       
-      // Only update progress if the new value is higher than the existing one
-      // (unless it's an error state with progress = -1)
-      if (newProgress === -1 || newProgress >= progressData[jobId].encoding) {
-        progressData[jobId].encoding = newProgress;
-      }
+      const hasError = statusUpdate.processing && 
+                       statusUpdate.processing.status && 
+                       statusUpdate.processing.status.startsWith("Error");
       
-      // Update the general status from encoding status
-      if (statusUpdate.encoding.status) {
-        progressData[jobId].status = statusUpdate.encoding.status;
-        // Log the status update to console with the job ID
-        console.log(`Job ID [${jobId}]: ${statusUpdate.encoding.status}`);
-      }
-    }
-    
-    // Check for job completion - only if we have a specific "Processing complete" status
-    // This ensures we only mark as complete at the very end after audio merging
-    if (statusUpdate.processing && 
-        statusUpdate.processing.status && 
-        statusUpdate.processing.status === "Processing complete") {
-      // This is the final step, so mark job as complete and remove from tracking
-      progressData[jobId].status = "Video generation complete";
-      console.log(`Job ID [${jobId}]: Video generation complete`);
-      
-      // Write updated progress data first
-      fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
-      
-      console.log(`Job ID [${jobId}]: Job completed, removed from tracking`);
-      
-      // Add to the completed jobs set
-      completedJobs.add(jobId);
-      
-      // Immediately delete the entry from progress.json
-      delete progressData[jobId];
-      fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
-      
-      return; // Skip the regular write since we've already written the file
-    }
-    
-    // For error conditions, still remove the job
-    if (statusUpdate.processing && 
-        statusUpdate.processing.status && 
-        statusUpdate.processing.status.startsWith("Error")) {
-      try {
-        // Write updated progress data first
-        fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+      // Handle job completion - regular completion or error
+      if (isComplete || hasError) {
+        if (isComplete) {
+          // Set final status for regular completion
+          progressData[jobId].status = "Video generation complete";
+          console.log(`Job ID [${jobId}]: Video generation complete`);
+        }
         
-        console.log(`Job ID [${jobId}]: Job completed with error, removed from tracking`);
+        // Write the progress file with the completion status
+        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
         
-        // Add to the completed jobs set
+        // Mark job as completed
         completedJobs.add(jobId);
         
-        // Immediately delete the entry from progress.json
+        // Remove the job from progress tracking
         delete progressData[jobId];
-        fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
+        console.log(`Job ID [${jobId}]: Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
         
-        return; // Skip the regular write since we've already written the file
-      } catch (err) {
-        console.warn(`Job ID [${jobId}]: Warning: Could not remove job from progress tracking: ${err.message}`);
+        // Write the updated file without the job
+        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
+      } else {
+        // Regular update - write once at the end
+        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
       }
     }
-    
-    // Write updated progress data
-    fs.writeFileSync('progress.json', JSON.stringify(progressData, null, 2));
   } catch (err) {
     console.warn(`Job ID [${jobId}]: Warning: Could not update progress: ${err.message}`);
   }
