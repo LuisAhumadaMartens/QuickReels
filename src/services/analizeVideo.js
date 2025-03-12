@@ -38,8 +38,6 @@ function on(event, callback) {
  * Direct implementation from tensorflow-test-cli.js
  */
 async function initializeTensorFlow() {
-  console.log('Initializing TensorFlow.js...');
-  
   try {
     // Check if model directory exists
     if (!fs.existsSync(MODEL_PATH)) {
@@ -50,36 +48,28 @@ async function initializeTensorFlow() {
     const modelJsonPath = path.join(MODEL_PATH, 'model.json');
     const savedModelPath = path.join(MODEL_PATH, 'saved_model.pb');
     
-    console.log(`Loading model from: ${MODEL_PATH}`);
-    
     // First try loading as GraphModel (model.json)
     if (fs.existsSync(modelJsonPath)) {
-      console.log('Found model.json, loading as GraphModel');
       try {
         model = await tf.loadGraphModel(`file://${modelJsonPath}`);
-        console.log('Successfully loaded model from model.json');
         return true;
       } catch (err) {
-        console.warn('Failed to load as GraphModel:', err.message);
+        // Continue to next method
       }
     }
     
     // Then try loading as SavedModel
     if (fs.existsSync(savedModelPath)) {
-      console.log('Found saved_model.pb, loading as SavedModel');
       try {
         model = await tf.node.loadSavedModel(MODEL_PATH);
-        console.log('Successfully loaded model from SavedModel');
         return true;
       } catch (err) {
-        console.error('Failed to load as SavedModel:', err);
         throw err;
       }
     }
     
     throw new Error('No compatible model files found in the specified directory');
   } catch (error) {
-    console.error('Error initializing TensorFlow:', error);
     return false;
   }
 }
@@ -93,9 +83,6 @@ async function prepareInputTensor(frameBuffer) {
     // Decode image to tensor (3 channels for RGB)
     const imageTensor = tf.node.decodeImage(frameBuffer, 3);
     
-    // Log original shape
-    console.log(`Original image shape: ${imageTensor.shape}`);
-    
     // Resize to MoveNet input size (192x192) - matches Python's cv2.resize
     const resized = tf.image.resizeBilinear(imageTensor, MOVE_NET_INPUT_SIZE);
     
@@ -105,15 +92,11 @@ async function prepareInputTensor(frameBuffer) {
     // Add batch dimension (matches Python's tf.expand_dims(input_tensor, axis=0))
     const batchedTensor = tf.expandDims(convertedTensor, 0);
     
-    // Log final tensor shape
-    console.log(`Prepared tensor shape: ${batchedTensor.shape}`);
-    
     // Clean up intermediate tensors
     tf.dispose([imageTensor, resized, convertedTensor]);
     
     return batchedTensor;
   } catch (error) {
-    console.error('Error preparing input tensor:', error);
     throw error;
   }
 }
@@ -143,7 +126,6 @@ function calculateMSE(tensorA, tensorB) {
  */
 async function runInference(tensor) {
   if (!model) {
-    console.warn('Model not loaded, using default detection');
     return [{ 
       x: 0.5,
       y: 0.5,
@@ -157,24 +139,17 @@ async function runInference(tensor) {
 
   try {
     // Process the frame through the model
-    console.log('Running MoveNet inference...');
-    
-    // In TensorFlow.js, we need to use predict() instead of execute()
-    // This is different from Python, which uses signatures['serving_default']
     let result = await model.predict(tensor);
     
     // Extract keypoints from the result
     let keypoints = [];
     if (result.output_0) {
       // SavedModel format
-      console.log('Found output_0 tensor:', result.output_0.shape);
       keypoints = result.output_0.arraySync()[0];
     } else if (result.arraySync) {
       // GraphModel format
-      console.log('Found tensor with shape:', result.shape);
       keypoints = result.arraySync()[0];
-          } else {
-      console.warn('Unknown result format:', result);
+    } else {
       return [];
     }
     
@@ -214,16 +189,12 @@ async function runInference(tensor) {
           keypoints: validKeypoints
         };
         
-        console.log(`Found person with ${validKeypoints.length} valid keypoints, confidence ${avgConfidence.toFixed(2)}`);
         detections.push(detection);
       }
     }
     
-    console.log(`Found ${detections.length} detections in frame`);
-    
     return detections;
   } catch (error) {
-    console.error('Error in runInference:', error);
     return [];
   }
 }
@@ -293,7 +264,8 @@ function formatTimecode(seconds) {
  * @returns {Object} - Analysis results
  */
 async function analizeVideo(inputPath, jobId = null) {
-  console.log(`Analyzing video: ${inputPath}`);
+  const processingId = jobId || generateRandomId();
+  console.log(`Job ID [${processingId}]: Analyzing video`);
   
   try {
     // If we have a job ID, update progress
@@ -305,9 +277,6 @@ async function analizeVideo(inputPath, jobId = null) {
     
     // Initialize TensorFlow and load model
     await initializeTensorFlow();
-    
-    // Generate a job ID if not provided
-    const processingId = jobId || generateRandomId();
     
     // Create project-relative temp directory structure
     const projectRoot = process.cwd();
@@ -331,10 +300,7 @@ async function analizeVideo(inputPath, jobId = null) {
       fs.mkdirSync(analysisFramesDir, { recursive: true });
     }
     
-    console.log(`Using temporary directory: ${tempDir}`);
-    
     // Copy input file to temp directory
-    console.log(`Copying input file to: ${tempInputPath}`);
     fs.copyFileSync(inputPath, tempInputPath);
     
     // Extract video metadata - still at 0% progress, just update the status text
@@ -366,9 +332,7 @@ async function analizeVideo(inputPath, jobId = null) {
       });
     });
     
-    console.log(`Video metadata: ${JSON.stringify(metadata)}`);
-    
-    // Extract frames for analysis - still at 0% progress, just update the status
+    // Extract frames for analysis
     if (jobId) {
       updateProgress(jobId, {
         analysis: { progress: 0, status: "Extracting frames for analysis..." }
@@ -384,8 +348,6 @@ async function analizeVideo(inputPath, jobId = null) {
         .run();
     });
 
-    console.log('Frames extracted for analysis');
-    
     // Get all frame files sorted by number
     const frameFiles = fs.readdirSync(analysisFramesDir)
       .filter(file => file.startsWith('frame_') && file.endsWith('.jpg'))
@@ -395,7 +357,7 @@ async function analizeVideo(inputPath, jobId = null) {
         return numA - numB;
       });
     
-    console.log(`Found ${frameFiles.length} frames for analysis`);
+    console.log(`Job ID [${processingId}]: Found ${frameFiles.length} frames for analysis`);
     
     // Initialize movement planner
     const planner = new MovementPlanner(metadata.fps);
@@ -403,14 +365,21 @@ async function analizeVideo(inputPath, jobId = null) {
     const frameDiffs = [];
     const sceneChanges = [];
     
-    // Update progress for analysis starting - still at 0% but updating the status
+    // Update progress for analysis starting
     if (jobId) {
       updateProgress(jobId, {
         analysis: { progress: 0, status: "Analyzing frames: 0%" }
       });
     }
     
+    // Track current percentage for progress updates
+    let lastReportedProgress = 0;
+    
     // First pass: Analyze each frame (like in Python)
+    // Calculate the interval between progress updates to get exactly 100 steps
+    const progressInterval = Math.max(1, Math.floor(frameFiles.length / 100));
+    console.log(`Job ID [${processingId}]: Starting analysis of ${frameFiles.length} frames (reporting every ${progressInterval} frames)`);
+
     for (let i = 0; i < frameFiles.length; i++) {
       const frameFile = path.join(analysisFramesDir, frameFiles[i]);
       const imageBuffer = fs.readFileSync(frameFile);
@@ -426,7 +395,6 @@ async function analizeVideo(inputPath, jobId = null) {
         
         // Detect scene changes
         if (frameDiff > SCENE_CHANGE_THRESHOLD) {
-          console.log(`Scene change detected at frame ${i}, MSE: ${frameDiff}`);
           sceneChanges.push(i);
         }
       }
@@ -463,19 +431,25 @@ async function analizeVideo(inputPath, jobId = null) {
       // Clean up tensors
       inputTensor.dispose();
       
-      // Log progress
-      if (i % 10 === 0 || i === frameFiles.length - 1) {
+      // Log progress exactly 100 times during the process (once per percent)
+      if (i % progressInterval === 0 || i === frameFiles.length - 1) {
         const progress = Math.floor((i / frameFiles.length) * 100);
-        console.log(`Analyzing: ${progress}%`);
         
-        // Update progress with the direct percentage value
-        if (jobId) {
-          updateProgress(jobId, {
-            analysis: { 
-              progress: progress, 
-              status: `Analyzing frames: ${progress}%` 
-            }
-          });
+        // Only log if this is a new percentage
+        if (progress !== lastReportedProgress) {
+          // Update progress with the direct percentage value
+          if (jobId) {
+            updateProgress(jobId, {
+              analysis: { 
+                progress: progress, 
+                status: `Analyzing frames: ${progress}%` 
+              }
+            });
+            
+            // Log the progress
+            console.log(`Job ID [${processingId}]: Analyzing frames: ${progress}%`);
+            lastReportedProgress = progress;
+          }
         }
       }
     }
@@ -493,9 +467,6 @@ async function analizeVideo(inputPath, jobId = null) {
     // Clean up
     prevFrameGray?.dispose();
     
-    // Clean up temporary directory at the end (optional, since processing may need it)
-    // Instead of deleting, we will leave it for processVideo to use and clean up
-    
     // Return analysis results
     return {
       inputPath: tempInputPath,
@@ -507,7 +478,7 @@ async function analizeVideo(inputPath, jobId = null) {
       tempDir: tempDir
     };
   } catch (error) {
-    console.error('Error analyzing video:', error);
+    console.error(`Job ID [${processingId}]: Error analyzing video: ${error.message}`);
     
     // Update progress with error if we have a job ID
     if (jobId) {
@@ -524,7 +495,7 @@ async function analizeVideo(inputPath, jobId = null) {
  * Process video based on analysis results
  */
 async function processVideo(inputPath, outputs, analysis) {
-  console.log(`Processing video based on analysis: ${inputPath}`);
+
   
   // Process each output based on analysis
   const results = await Promise.all(outputs.map(async (output, index) => {
@@ -541,7 +512,6 @@ async function processVideo(inputPath, outputs, analysis) {
       }
     }
     
-    console.log(`Processing output ${index + 1}: ${url} with range ${effectiveRange || 'full video'}`);
     
     // Actually process the video segment here
     // For now, this is just returning placeholder data
@@ -837,7 +807,6 @@ class PersonTracker {
  * Extract keypoints for a specific segment of video
  */
 async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
-  console.log(`Extracting keypoints for frames ${startFrame}-${endFrame} from ${inputPath}`);
   
   // Create a temporal directory for intermediate files
   const tempDir = path.join(os.tmpdir(), `quickreels-keypoints-${Date.now()}`);
@@ -873,8 +842,6 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
     const startTime = startFrame / metadata.fps;
     const duration = (endFrame - startFrame) / metadata.fps;
     
-    console.log(`Extracting frames from ${formatTimecode(startTime)} to ${formatTimecode(startTime + duration)}`);
-    
     // Extract only the frames we need
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
@@ -887,7 +854,6 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
           resolve();
         })
         .on('error', (err) => {
-          console.error('FFmpeg error:', err);
           reject(err);
         })
         .output(path.join(tempDir, 'frame-%04d.jpg'))
@@ -898,8 +864,6 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
     const frameFiles = fs.readdirSync(tempDir)
       .filter(file => file.endsWith('.jpg'))
       .sort();
-    
-    console.log(`Extracted ${frameFiles.length} frames for segment`);
     
     // Keypoint data collection
     const keypointData = [];
@@ -927,8 +891,6 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
         // Clean up
         tf.dispose(frameTensor);
       } catch (error) {
-        console.error(`Error processing frame ${frameFile} for keypoints:`, error);
-        
         // Add empty keypoints for this frame
         keypointData.push({
           frame: startFrame + i,
@@ -942,7 +904,7 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
     } catch (e) {
-      console.warn('Failed to remove temporary directory:', e);
+      // Silently continue if cleanup fails
     }
     
     // Return simplified keypoint data
@@ -957,7 +919,6 @@ async function getKeypointsForSegment(inputPath, startFrame, endFrame) {
       } : null
     }));
   } catch (error) {
-    console.error('Error extracting keypoints for segment:', error);
     throw error;
   }
 }

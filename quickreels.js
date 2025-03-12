@@ -82,9 +82,6 @@ app.post('/process-reel', async (req, res) => {
       videoGenerated: false
     });
     
-    // Process the video
-    console.log(`Processing reel job ${jobId} from: ${input} to: ${outputPath}`);
-    
     // Start processing in the background
     (async () => {
       try {
@@ -97,9 +94,8 @@ app.post('/process-reel', async (req, res) => {
         });
         
         const result = await processVideo(input, outputPath, analysis, jobId);
-        console.log(`Processing completed for job ${jobId}:`, result);
       } catch (error) {
-        console.error(`Error processing job ${jobId}:`, error);
+        console.error(`Job ID [${jobId}]: Error processing: ${error.message}`);
         
         // Determine which stage had the error
         if (error.message.includes('analiz') || error.message.includes('analys')) {
@@ -122,7 +118,7 @@ app.post('/process-reel', async (req, res) => {
       output: outputPath 
     });
   } catch (error) {
-    console.error('Error initializing video processing:', error);
+    console.error(`Error initializing video processing: ${error.message}`);
     return sendErrorResponse(res, 500, `Error initializing video processing: ${error.message}`, 'PROCESSING_ERROR');
   }
 });
@@ -189,7 +185,7 @@ app.get('/status/:jobId', (req, res) => {
       ...jobStatus
     });
   } catch (error) {
-    console.error('Error checking job status:', error);
+    console.error(`Error checking job status: ${error.message}`);
     return sendErrorResponse(res, 500, `Error checking job status: ${error.message}`, 'STATUS_CHECK_ERROR');
   }
 });
@@ -228,7 +224,7 @@ const startServer = async () => {
     
     return server;
   } catch (err) {
-    console.error('Failed to start server:', err);
+    console.error(`Failed to start server: ${err.message}`);
     throw err;
   }
 };
@@ -367,7 +363,7 @@ module.exports = {
 // Start the server if this is the main module
 if (require.main === module) {
   startServer().catch(err => {
-    console.error('Failed to start server:', err);
+    console.error(`Failed to start server: ${err.message}`);
   });
 }
 

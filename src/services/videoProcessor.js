@@ -141,36 +141,43 @@ class VideoProcessor {
     this.metadata = null;
     this.personTracker = null;
     this.movementPlanner = null;
+    this.jobId = null;
   }
   
   async _initializeVideoMetadata() {
     this.metadata = await getVideoMetadata(this.inputPath);
-    console.log('Video metadata:', this.metadata);
+    if (this.jobId) {
+      console.log(`Job ID [${this.jobId}]: Video metadata initialized`);
+    }
     this.personTracker = new videoAnalyzer.PersonTracker();
     this.movementPlanner = new videoAnalyzer.MovementPlanner(this.metadata.fps);
   }
   
-  async processAll() {
+  async processAll(jobId = null) {
+    this.jobId = jobId;
     try {
       // Initialize video metadata first
       await this._initializeVideoMetadata();
-      console.log('Video metadata initialized:', this.metadata);
       
       // First pass: analyze the entire video once
-      console.log("Starting video analysis...");
+      if (this.jobId) {
+        console.log(`Job ID [${this.jobId}]: Starting video analysis`);
+      }
       
       // Get the analysis with frame interval
-      console.log(`Analyzing video: ${this.inputPath}`);
-      const analysis = await videoAnalyzer.analizeVideo(this.inputPath, this.segments.map(s => s.outputPath));
+      const analysis = await videoAnalyzer.analizeVideo(this.inputPath, this.jobId);
       
       // Store the analysis results for later use
       this._analysisResults = analysis;
       
-      // At this point, we should have the analysis results including smoothed positions
-      console.log("Video analysis complete");
+      if (this.jobId) {
+        console.log(`Job ID [${this.jobId}]: Video analysis complete`);
+      }
       
       if (!analysis || !analysis.smoothedPositions || analysis.smoothedPositions.length === 0) {
-        console.warn("WARNING: Analysis did not produce smoothed positions, using center position");
+        if (this.jobId) {
+          console.log(`Job ID [${this.jobId}]: WARNING: Analysis did not produce smoothed positions, using center position`);
+        }
         // Create default positions (center)
         const centerPositions = Array(this.metadata.totalFrames).fill(0.5);
         analysis.smoothedPositions = centerPositions;
@@ -178,7 +185,9 @@ class VideoProcessor {
       
       // Second pass: Process each segment
       const { smoothedPositions } = analysis;
-      console.log(`Processing ${this.segments.length} segments with ${smoothedPositions.length} position keyframes`);
+      if (this.jobId) {
+        console.log(`Job ID [${this.jobId}]: Processing ${this.segments.length} segments with ${smoothedPositions.length} position keyframes`);
+      }
       
       // Add timeout protection
       const MAX_PROCESSING_TIME = 300000; // 5 minutes in milliseconds
@@ -186,18 +195,26 @@ class VideoProcessor {
       
       // Process each segment with a time limit
       for (const segment of this.segments) {
-        console.log(`Processing segment: ${segment.outputPath} [${segment.startFrame || 0}-${segment.endFrame || 'end'}]`);
+        if (this.jobId) {
+          console.log(`Job ID [${this.jobId}]: Processing segment: ${segment.outputPath} [${segment.startFrame || 0}-${segment.endFrame || 'end'}]`);
+        }
         
         try {
           // Check if we've been processing too long
           if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-            console.warn("WARNING: Processing time limit exceeded, stopping further processing");
+            if (this.jobId) {
+              console.log(`Job ID [${this.jobId}]: WARNING: Processing time limit exceeded, stopping further processing`);
+            }
             break;
           }
           
           await this._processSegment(segment, smoothedPositions);
         } catch (segmentError) {
-          console.error(`Error processing segment ${segment.outputPath}:`, segmentError);
+          if (this.jobId) {
+            console.error(`Job ID [${this.jobId}]: Error processing segment ${segment.outputPath}: ${segmentError.message}`);
+          } else {
+            console.error(`Error processing segment ${segment.outputPath}:`, segmentError);
+          }
           // Continue with next segment
         }
       }
@@ -208,13 +225,19 @@ class VideoProcessor {
         duration: this.metadata.duration
       };
     } catch (error) {
-      console.error("Error processing video:", error);
+      if (this.jobId) {
+        console.error(`Job ID [${this.jobId}]: Error processing video: ${error.message}`);
+      } else {
+        console.error("Error processing video:", error);
+      }
       throw error;
     }
   }
   
   async _processSegment(segment, smoothedPositions) {
-    console.log(`Processing segment: ${segment.outputPath}`);
+    if (this.jobId) {
+      console.log(`Job ID [${this.jobId}]: Processing segment: ${segment.outputPath}`);
+    }
     
     // Ensure metadata is initialized
     if (!this.metadata) {
@@ -228,7 +251,9 @@ class VideoProcessor {
     let endFrame = segment.endFrame || totalFrames - 1;
     
     if (endFrame <= startFrame) {
-      console.warn(`Warning: Invalid frame range ${startFrame}-${endFrame}, using default`);
+      if (this.jobId) {
+        console.log(`Job ID [${this.jobId}]: WARNING: Invalid frame range ${startFrame}-${endFrame}, using default`);
+      }
       // Use a reasonable default - 5 second clip
       endFrame = Math.min(startFrame + (5 * this.metadata.fps), totalFrames - 1);
     }
@@ -238,7 +263,9 @@ class VideoProcessor {
     const startTime = startFrame / fps;
     const duration = (endFrame - startFrame) / fps;
     
-    console.log(`Segment timing: ${startTime}s to ${startTime + duration}s (duration: ${duration}s)`);
+    if (this.jobId) {
+      console.log(`Job ID [${this.jobId}]: Segment timing: ${startTime}s to ${startTime + duration}s (duration: ${duration}s)`);
+    }
     
     // Get relevant smoothed positions for this segment (with bounds checking)
     let segmentPositions = [];
@@ -256,15 +283,14 @@ class VideoProcessor {
     }
     
     if (segmentPositions.length === 0) {
-      console.warn('No position data available, using center position');
+      if (this.jobId) {
+        console.log(`Job ID [${this.jobId}]: No position data available, using center position`);
+      }
       segmentPositions = Array(endFrame - startFrame + 1).fill(0.5);
     }
     
     // Generate the filter string for ffmpeg
     const filterScript = this._generateFilterScript(segmentPositions);
-    
-    // Log the filter script for debugging
-    console.log(`Using filter: ${filterScript.substring(0, 150)}... [truncated]`);
     
     return new Promise((resolve, reject) => {
       ffmpeg(this.inputPath)
@@ -279,17 +305,27 @@ class VideoProcessor {
         ])
         .output(segment.outputPath)
         .on('start', (commandLine) => {
-          console.log(`FFmpeg command: ${commandLine}`);
+          if (this.jobId) {
+            console.log(`Job ID [${this.jobId}]: FFmpeg started`);
+          }
         })
         .on('progress', (progress) => {
-          console.log(`Processing ${segment.outputPath}: ${Math.floor(progress.percent)}% done`);
+          if (this.jobId) {
+            console.log(`Job ID [${this.jobId}]: Processing ${segment.outputPath}: ${Math.floor(progress.percent)}% done`);
+          }
         })
         .on('end', () => {
-          console.log(`Successfully processed segment: ${segment.outputPath}`);
+          if (this.jobId) {
+            console.log(`Job ID [${this.jobId}]: Successfully processed segment: ${segment.outputPath}`);
+          }
           resolve();
         })
         .on('error', (err) => {
-          console.error(`Error processing segment: ${err}`);
+          if (this.jobId) {
+            console.error(`Job ID [${this.jobId}]: Error processing segment: ${err.message}`);
+          } else {
+            console.error(`Error processing segment: ${err}`);
+          }
           reject(err);
         })
         .run();
