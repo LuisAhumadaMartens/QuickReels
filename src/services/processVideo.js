@@ -1,13 +1,9 @@
 const videoAnalyzer = require('./analizeVideo');
-const { VideoProcessor, VideoSegment, parseFrameRange } = require('./videoProcessor');
 const path = require('path');
-const os = require('os');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
-const tf = require('@tensorflow/tfjs-node');
 const cv = require('@u4/opencv4nodejs');
 const crypto = require('crypto');
-// const sharp = require('sharp');
 
 // Constants to match Python implementation
 const DEFAULT_CENTER = 0.5;  // normalized center (50%)
