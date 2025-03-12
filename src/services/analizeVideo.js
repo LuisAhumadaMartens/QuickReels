@@ -378,7 +378,6 @@ async function analizeVideo(inputPath, jobId = null) {
     // First pass: Analyze each frame (like in Python)
     // Calculate the interval between progress updates to get exactly 100 steps
     const progressInterval = Math.max(1, Math.floor(frameFiles.length / 100));
-    console.log(`Job ID [${processingId}]: Starting analysis of ${frameFiles.length} frames (reporting every ${progressInterval} frames)`);
 
     for (let i = 0; i < frameFiles.length; i++) {
       const frameFile = path.join(analysisFramesDir, frameFiles[i]);
@@ -446,8 +445,7 @@ async function analizeVideo(inputPath, jobId = null) {
               }
             });
             
-            // Log the progress
-            console.log(`Job ID [${processingId}]: Analyzing frames: ${progress}%`);
+            // Don't log here - updateProgress() likely already logs this message
             lastReportedProgress = progress;
           }
         }
