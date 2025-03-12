@@ -513,12 +513,27 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     }
     
     // Update progress with calculated percentage
-    updateProgress(processingId, {
-      processing: { 
-        progress: overallPercentage,
-        status: statusMessage
-      }
-    });
+    if (phase === 'encoding') {
+      // For encoding phase, update both the overall processing progress and the encoding progress
+      updateProgress(processingId, {
+        processing: { 
+          progress: overallPercentage,
+          status: statusMessage
+        },
+        encoding: {
+          progress: phasePercentage,
+          status: statusMessage
+        }
+      });
+    } else {
+      // For other phases, just update the processing progress
+      updateProgress(processingId, {
+        processing: { 
+          progress: overallPercentage,
+          status: statusMessage
+        }
+      });
+    }
     
     return overallPercentage;
   }
