@@ -461,85 +461,35 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   
   // Simplified progress tracking function
   function updatePhaseProgress(phase, phaseProgress = 1) {
+    // Only track frame cropping progress
+    if (phase !== 'frameCropping') {
+      return 0;
+    }
+    
     // Convert phase name to config key format
     const phaseKey = phase.replace(/([A-Z])/g, '_$1').toUpperCase();
     const phaseInfo = processingPhases[phaseKey];
     
     if (!phaseInfo) return 0;
     
-    // Calculate percentage for this phase
+    // Calculate percentage for frame cropping phase
     const phasePercentage = Math.floor(phaseProgress * 100);
     
-    // Handle different phases
-    if (phase === 'frameCropping') {
-      // For frame cropping (50% of total processing)
-      const adjustedProgress = Math.floor(phasePercentage * 0.5); // 50% of processing is frame cropping
-      
-      // Create the status message
-      const statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
-      
-      // Update processing progress
-      const progressUpdate = {
-        processing: { 
-          progress: adjustedProgress,
-          status: statusMessage
-        }
-      };
-      
-      // Update progress
-      updateProgress(processingId, progressUpdate);
-      
-      return adjustedProgress;
-    } 
-    else if (phase === 'encoding') {
-      // For encoding (40% of total processing, from 50-90%)
-      const adjustedProgress = 50 + Math.floor(phasePercentage * 0.4); // 40% of processing is encoding
-      
-      // Create the status message - show the actual encoding percentage
-      const statusMessage = `Encoding: ${phasePercentage}%`;
-      
-      // Update processing progress
-      const progressUpdate = {
-        processing: { 
-          progress: adjustedProgress,
-          status: statusMessage
-        }
-      };
-      
-      // Update progress
-      updateProgress(processingId, progressUpdate);
-      
-      // Also log to console
-      console.log(`Encoding: ${phasePercentage}%`);
-      
-      return adjustedProgress;
-    }
-    else if (phase === 'audioMerging') {
-      // For audio merging (10% of total processing, from 90-100%)
-      const adjustedProgress = 90 + Math.floor(phasePercentage * 0.1); // 10% of processing is audio
-      
-      // Create the status message - show the actual audio merging percentage
-      const statusMessage = `Adding audio: ${phasePercentage}%`;
-      
-      // Update processing progress
-      const progressUpdate = {
-        processing: { 
-          progress: adjustedProgress,
-          status: statusMessage
-        }
-      };
-      
-      // Update progress
-      updateProgress(processingId, progressUpdate);
-      
-      // Also log to console
-      console.log(`Adding audio: ${phasePercentage}%`);
-      
-      return adjustedProgress;
-    }
+    // Create the status message for frame cropping
+    const statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
     
-    // Any other phase (like preparation) - don't update progress.json
-    return 0;
+    // Update processing progress for frame cropping
+    const progressUpdate = {
+      processing: { 
+        progress: phasePercentage,
+        status: statusMessage
+      }
+    };
+    
+    // Update progress
+    updateProgress(processingId, progressUpdate);
+    
+    return phasePercentage;
   }
   
   // Set up directories
@@ -695,7 +645,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     updatePhaseProgress('frameCropping', 1);
     
     // Encode the video
-    await encodeVideo(processingFramesDir, tempOutputPath, fps);
+    await encodeVideo(processingFramesDir, tempOutputPath, fps, processingId);
     
     // Create output directory if it doesn't exist
     const outputDir = path.dirname(outputPath);
@@ -704,7 +654,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     }
     
     // Add audio to the video
-    await addAudioToVideo(tempOutputPath, tempInputPath, outputPath);
+    await addAudioToVideo(tempOutputPath, tempInputPath, outputPath, processingId);
     
     // Update progress to 100% when processing is complete
     updateProgress(processingId, {
@@ -836,9 +786,10 @@ function processVideoFrame(frame, options) {
  * @param {string} framesDir - Directory containing processed frames
  * @param {string} outputPath - Path for output video
  * @param {number} fps - Frames per second
+ * @param {string} jobId - Processing job ID for logging
  * @returns {Promise<void>}
  */
-async function encodeVideo(framesDir, outputPath, fps) {
+async function encodeVideo(framesDir, outputPath, fps, jobId) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(path.join(framesDir, 'frame_%08d.png'))
@@ -853,13 +804,19 @@ async function encodeVideo(framesDir, outputPath, fps) {
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        // Basic logging for monitoring
+        // Use consistent format with job ID
         if (progress && progress.percent) {
-          console.log(`Encoding: ${Math.floor(progress.percent)}%`);
+          console.log(`Job ID [${jobId}]: Encoding: ${Math.floor(progress.percent)}%`);
         }
       })
-      .on('end', resolve)
-      .on('error', reject)
+      .on('end', () => {
+        console.log(`Job ID [${jobId}]: Encoding complete`);
+        resolve();
+      })
+      .on('error', (err) => {
+        console.error(`Job ID [${jobId}]: Encoding error: ${err.message}`);
+        reject(err);
+      })
       .run();
   });
 }
@@ -869,9 +826,10 @@ async function encodeVideo(framesDir, outputPath, fps) {
  * @param {string} videoPath - Path to encoded video without audio
  * @param {string} audioSource - Path to audio source
  * @param {string} outputPath - Path for final output with audio
+ * @param {string} jobId - Processing job ID for logging
  * @returns {Promise<void>}
  */
-async function addAudioToVideo(videoPath, audioSource, outputPath) {
+async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
@@ -885,13 +843,17 @@ async function addAudioToVideo(videoPath, audioSource, outputPath) {
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        // Basic logging for monitoring
+        // Use consistent format with job ID
         if (progress && progress.percent) {
-          console.log(`Adding audio: ${Math.floor(progress.percent)}%`);
+          console.log(`Job ID [${jobId}]: Adding audio: ${Math.floor(progress.percent)}%`);
         }
       })
-      .on('end', resolve)
+      .on('end', () => {
+        console.log(`Job ID [${jobId}]: Audio merging complete`);
+        resolve();
+      })
       .on('error', (err) => {
+        console.error(`Job ID [${jobId}]: Audio merging error: ${err.message}`);
         reject(err);
       })
       .run();
