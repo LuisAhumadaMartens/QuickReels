@@ -9,7 +9,8 @@ const EventEmitter = require('events');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 const config = require('../config/config');
-const { updateProgress, generateRandomId } = require('./processVideo');
+const { generateRandomId } = require('./processVideo');
+const { updateProgress } = require('../utils/progressTracker');
 
 // Set the ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);

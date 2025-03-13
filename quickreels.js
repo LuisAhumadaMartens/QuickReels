@@ -11,7 +11,8 @@ const config = require('./src/config/config');
 const portManager = require('./src/services/portManager');
 const apiRoutes = require('./src/routes/api');
 const { analizeVideo } = require('./src/services/analizeVideo');
-const { processVideo, generateRandomId, updateProgress } = require('./src/services/processVideo');
+const { processVideo, generateRandomId } = require('./src/services/processVideo');
+const { updateProgress } = require('./src/utils/progressTracker');
 
 
 // ------------------------------------------------------------

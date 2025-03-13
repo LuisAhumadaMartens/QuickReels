@@ -7,6 +7,8 @@ const crypto = require('crypto');
 
 // Import configuration from central config.js
 const config = require('../config/config');
+// Import the progress tracker
+const { updateProgress } = require('../utils/progressTracker');
 
 /**
  * Generate a random alphanumeric ID
@@ -339,126 +341,6 @@ class MovementPlanner {
 
 // Track completed jobs to prevent duplicate updates
 const completedJobs = new Set();
-
-/**
- * Update the progress tracking file with job status
- * @param {string} jobId - The job ID
- * @param {Object} statusUpdate - The status update object containing progress and status information
- * @param {Object} [statusUpdate.analysis] - Analysis phase status
- * @param {Object} [statusUpdate.processing] - Processing phase status
- * @param {Object} [statusUpdate.encoding] - Encoding phase status
- * @param {Object} [statusUpdate.audio] - Audio merging phase status
- */
-function updateProgress(jobId, statusUpdate) {
-  try {
-    // If the job has been marked as completed, ignore further updates
-    if (completedJobs.has(jobId)) {
-      return;
-    }
-
-    // Read existing progress data once
-    let progressData = {};
-    const progressFilePath = config.PROGRESS_FILE;
-    
-    if (fs.existsSync(progressFilePath)) {
-      progressData = JSON.parse(fs.readFileSync(progressFilePath, 'utf-8'));
-    }
-    
-    // Initialize job entry if it doesn't exist
-    if (!progressData[jobId]) {
-      progressData[jobId] = {
-        status: "Initializing...",
-        analysis: 0,
-        processing: 0,
-        encoding: 0,
-        audio: 0
-      };
-    }
-    
-    // Generalized function to update a specific phase
-    const updatePhase = (phase, phaseUpdate) => {
-      if (!phaseUpdate) return false;
-      
-      let wasUpdated = false;
-      
-      // Update progress if provided and higher than current (or error state)
-      if (phaseUpdate.progress !== undefined) {
-        const newProgress = phaseUpdate.progress;
-        if (newProgress === -1 || newProgress >= progressData[jobId][phase]) {
-          progressData[jobId][phase] = newProgress;
-          wasUpdated = true;
-        }
-      }
-      
-      // Update status message if provided
-      if (phaseUpdate.status) {
-        progressData[jobId].status = phaseUpdate.status;
-        console.log(`Job ID [${jobId}]: ${phaseUpdate.status}`);
-        wasUpdated = true;
-      }
-      
-      return wasUpdated;
-    };
-    
-    // Update each phase if needed
-    const analysisUpdated = updatePhase('analysis', statusUpdate.analysis);
-    const processingUpdated = updatePhase('processing', statusUpdate.processing);
-    const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
-    const audioUpdated = updatePhase('audio', statusUpdate.audio);
-    
-    // Check if videoGenerated flag is set
-    const videoGeneratedUpdated = statusUpdate.videoGenerated !== undefined;
-    if (videoGeneratedUpdated) {
-      progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
-    }
-    
-    // Only write to file if anything changed
-    if (analysisUpdated || processingUpdated || encodingUpdated || audioUpdated || videoGeneratedUpdated) {
-      // Check for completion conditions
-      const isComplete = statusUpdate.processing && 
-                         statusUpdate.processing.status === "Processing complete";
-      
-      const hasError = statusUpdate.processing && 
-                       statusUpdate.processing.status && 
-                       statusUpdate.processing.status.startsWith("Error");
-      
-      // Handle job completion - regular completion or error
-      if (isComplete || hasError) {
-        if (isComplete) {
-          // Set final status for regular completion
-          progressData[jobId].status = "Video generation complete";
-          console.log(`Job ID [${jobId}]: Video generation complete`);
-          
-          // Ensure all phases are set to 100% for completion
-          if (!hasError) {
-            progressData[jobId].analysis = 100;
-            progressData[jobId].processing = 100;
-            progressData[jobId].encoding = 100;
-            progressData[jobId].audio = 100;
-          }
-        }
-        
-        // Write the progress file with the completion status
-        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
-        
-        // Mark job as completed
-        completedJobs.add(jobId);
-        
-        // Remove the job from progress tracking
-        delete progressData[jobId];
-        console.log(`Job ID [${jobId}]: Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
-        
-        // Write the updated file without the job
-        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
-      } else {
-        // Regular update - write once at the end
-        fs.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
-      }
-    }
-  } catch (err) {
-    console.warn(`Job ID [${jobId}]: Warning: Could not update progress: ${err.message}`);
-  }
-}
 
 /**
  * Process a video based on analysis results
@@ -937,6 +819,5 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
 module.exports = {
   processVideo,
   MovementPlanner,  // Export for testing or advanced usage
-  generateRandomId,  // Export for reuse in other modules
-  updateProgress     // Export for external use
+  generateRandomId  // Export for reuse in other modules
 }; 
