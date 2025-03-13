@@ -75,11 +75,12 @@ app.post('/process-reel', async (req, res) => {
       return sendErrorResponse(res, 400, 'Invalid output path', 'INVALID_OUTPUT_PATH');
     }
     
-    // Initialize progress tracking with the simplified structure
-    // Note: No encoding field - only analysis and processing
+    // Initialize progress tracking with all fields
     updateProgress(jobId, {
       analysis: { progress: 0, status: "Starting video analysis..." },
       processing: { progress: 0, status: "Waiting for analysis to complete" },
+      encoding: { progress: 0, status: "Waiting for processing" },
+      audio: { progress: 0, status: "Waiting for encoding" },
       videoGenerated: false
     });
     
@@ -147,12 +148,16 @@ app.get('/status/:jobId', (req, res) => {
     
     const jobStatus = progressData[jobId];
     
-    // Calculate overall progress (analysis: 30%, processing: 70%)
-    // Note: encoding/audio phases are now deprecated and not included
+    // Calculate overall progress (analysis: 30%, processing: 50%, encoding: 15%, audio: 5%)
     const analysisProgress = jobStatus.analysis?.progress || 0;
     const processingProgress = jobStatus.processing?.progress || 0;
+    const encodingProgress = jobStatus.encoding?.progress || 0;
+    const audioProgress = jobStatus.audio?.progress || 0;
     const overallProgress = Math.round(
-      (analysisProgress * 0.3) + (processingProgress * 0.7)
+      (analysisProgress * 0.3) + 
+      (processingProgress * 0.5) + 
+      (encodingProgress * 0.15) + 
+      (audioProgress * 0.05)
     );
     
     // Determine current phase
@@ -162,13 +167,25 @@ app.get('/status/:jobId', (req, res) => {
     if (jobStatus.videoGenerated) {
       currentPhase = "complete";
       currentStatus = "Video generation complete";
+    } else if (audioProgress > 0 && audioProgress < 100) {
+      currentPhase = "audio";
+      currentStatus = jobStatus.audio?.status || "Adding audio";
+    } else if (audioProgress === 100) {
+      currentPhase = "complete";
+      currentStatus = "Audio merging complete";
+    } else if (encodingProgress > 0 && encodingProgress < 100) {
+      currentPhase = "encoding";
+      currentStatus = jobStatus.encoding?.status || "Encoding video";
+    } else if (encodingProgress === 100) {
+      currentPhase = "audio";
+      currentStatus = "Starting audio merging";
     } else if (analysisProgress === 100) {
       if (processingProgress === -1) {
         currentPhase = "error";
         currentStatus = jobStatus.processing?.status || "Error in processing";
       } else if (processingProgress === 100) {
-        currentPhase = "complete";
-        currentStatus = "Processing complete";
+        currentPhase = "encoding";
+        currentStatus = "Starting encoding";
       } else {
         currentPhase = "processing";
         currentStatus = jobStatus.processing?.status || "Processing video";
@@ -182,8 +199,8 @@ app.get('/status/:jobId', (req, res) => {
     }
     
     // Return the job status with additional info
-    // Remove encoding from the response by creating a clean response object
-    const responseData = {
+    // Include all progress fields in the response
+    return sendSuccessResponse(res, {
       jobId,
       currentPhase,
       currentStatus,
@@ -191,10 +208,10 @@ app.get('/status/:jobId', (req, res) => {
       status: jobStatus.status,
       analysis: jobStatus.analysis,
       processing: jobStatus.processing,
+      encoding: jobStatus.encoding,
+      audio: jobStatus.audio,
       videoGenerated: jobStatus.videoGenerated
-    };
-    
-    return sendSuccessResponse(res, responseData);
+    });
   } catch (error) {
     console.error(`Error checking job status: ${error.message}`);
     return sendErrorResponse(res, 500, `Error checking job status: ${error.message}`, 'STATUS_CHECK_ERROR');

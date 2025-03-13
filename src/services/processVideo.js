@@ -346,6 +346,8 @@ const completedJobs = new Set();
  * @param {Object} statusUpdate - The status update object containing progress and status information
  * @param {Object} [statusUpdate.analysis] - Analysis phase status
  * @param {Object} [statusUpdate.processing] - Processing phase status
+ * @param {Object} [statusUpdate.encoding] - Encoding phase status
+ * @param {Object} [statusUpdate.audio] - Audio merging phase status
  */
 function updateProgress(jobId, statusUpdate) {
   try {
@@ -367,8 +369,9 @@ function updateProgress(jobId, statusUpdate) {
       progressData[jobId] = {
         status: "Initializing...",
         analysis: 0,
-        processing: 0
-        // encoding field has been deprecated
+        processing: 0,
+        encoding: 0,
+        audio: 0
       };
     }
     
@@ -400,11 +403,11 @@ function updateProgress(jobId, statusUpdate) {
     // Update each phase if needed
     const analysisUpdated = updatePhase('analysis', statusUpdate.analysis);
     const processingUpdated = updatePhase('processing', statusUpdate.processing);
-    // Encoding phase is deprecated - no longer tracked in progress.json
-    // const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
+    const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
+    const audioUpdated = updatePhase('audio', statusUpdate.audio);
     
     // Only write to file if anything changed
-    if (analysisUpdated || processingUpdated) {
+    if (analysisUpdated || processingUpdated || encodingUpdated || audioUpdated) {
       // Check for completion conditions
       const isComplete = statusUpdate.processing && 
                          statusUpdate.processing.status === "Processing complete";
@@ -661,7 +664,16 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       processing: {
         progress: 100,
         status: "Processing complete"
-      }
+      },
+      encoding: {
+        progress: 100,
+        status: "Encoding complete"
+      },
+      audio: {
+        progress: 100,
+        status: "Audio merging complete"
+      },
+      videoGenerated: true
     });
     
     // Clean up temporary files
@@ -804,16 +816,37 @@ async function encodeVideo(framesDir, outputPath, fps, jobId) {
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        // Use consistent format with job ID
+        // Update progress.json and log progress with consistent format
         if (progress && progress.percent) {
-          console.log(`Job ID [${jobId}]: Encoding: ${Math.floor(progress.percent)}%`);
+          const percent = Math.floor(progress.percent);
+          updateProgress(jobId, {
+            encoding: {
+              progress: percent,
+              status: `Encoding: ${percent}%`
+            }
+          });
+          console.log(`Job ID [${jobId}]: Encoding: ${percent}%`);
         }
       })
       .on('end', () => {
+        // Always set to 100% when encoding is complete, regardless of last reported progress
+        updateProgress(jobId, {
+          encoding: { 
+            progress: 100,
+            status: "Encoding complete"
+          }
+        });
         console.log(`Job ID [${jobId}]: Encoding complete`);
         resolve();
       })
       .on('error', (err) => {
+        // Log error to progress.json
+        updateProgress(jobId, {
+          encoding: { 
+            progress: -1,
+            status: `Encoding error: ${err.message}`
+          }
+        });
         console.error(`Job ID [${jobId}]: Encoding error: ${err.message}`);
         reject(err);
       })
@@ -843,16 +876,37 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        // Use consistent format with job ID
+        // Update progress.json and log progress with consistent format
         if (progress && progress.percent) {
-          console.log(`Job ID [${jobId}]: Adding audio: ${Math.floor(progress.percent)}%`);
+          const percent = Math.floor(progress.percent);
+          updateProgress(jobId, {
+            audio: {
+              progress: percent,
+              status: `Adding audio: ${percent}%`
+            }
+          });
+          console.log(`Job ID [${jobId}]: Adding audio: ${percent}%`);
         }
       })
       .on('end', () => {
+        // Mark audio merging as complete in progress.json
+        updateProgress(jobId, {
+          audio: { 
+            progress: 100,
+            status: "Audio merging complete"
+          }
+        });
         console.log(`Job ID [${jobId}]: Audio merging complete`);
         resolve();
       })
       .on('error', (err) => {
+        // Log error to progress.json
+        updateProgress(jobId, {
+          audio: { 
+            progress: -1,
+            status: `Audio merging error: ${err.message}`
+          }
+        });
         console.error(`Job ID [${jobId}]: Audio merging error: ${err.message}`);
         reject(err);
       })
