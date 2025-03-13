@@ -1,24 +1,18 @@
 /**
  * Progress Tracking Service
  * This module handles progress tracking for video analysis and processing tasks
- * with optimized file I/O and in-memory caching for better performance.
+ * with console logging only (no file I/O).
+ * 
+ * DEPRECATED: File-based progress tracking has been removed. Progress is now only logged to the console.
  */
 
-const fs = require('fs').promises;
-const path = require('path');
-const fsSync = require('fs'); // For sync operations only where absolutely needed
+// Keep only the necessary imports
 const config = require('../config/config');
 
-// In-memory progress cache
+// In-memory progress cache (maintained for backward compatibility)
 const progressCache = new Map();
 // Set of completed jobs
 const completedJobs = new Set();
-// Queue of pending writes
-let writeQueue = [];
-// Write in progress flag
-let isWriting = false;
-// Throttle setting
-const WRITE_THROTTLE_MS = 1000; // 1 second
 
 /**
  * Centralized logging for job progress and status 
@@ -49,7 +43,30 @@ function logJobError(jobId, message, error = null) {
 }
 
 /**
- * Update progress in memory and queue a write (async implementation)
+ * Enhanced logging for progress updates
+ * @param {string} jobId - The job ID 
+ * @param {string} phase - The processing phase
+ * @param {number} progress - Progress percentage
+ * @param {string} status - Status message
+ */
+function logProgressUpdate(jobId, phase, progress, status) {
+  if (status) {
+    const isError = status.toLowerCase().includes('error');
+    logJobMessage(jobId, status, isError);
+  }
+  
+  if (progress !== undefined) {
+    // Only log meaningful progress changes (not minor increments)
+    if (progress === 100) {
+      logJobMessage(jobId, `${phase.toUpperCase()} phase completed (100%)`);
+    } else if (progress % 25 === 0) {
+      logJobMessage(jobId, `${phase.toUpperCase()} progress: ${progress}%`);
+    }
+  }
+}
+
+/**
+ * Update progress in memory (async implementation)
  * @param {string} jobId - The job ID
  * @param {Object} statusUpdate - The status update object
  */
@@ -59,7 +76,7 @@ async function updateProgressAsync(jobId, statusUpdate) {
     return;
   }
   
-  // Update in-memory cache first
+  // Update in-memory cache first (for backwards compatibility)
   if (!progressCache.has(jobId)) {
     progressCache.set(jobId, {
       status: "Initializing...",
@@ -68,6 +85,8 @@ async function updateProgressAsync(jobId, statusUpdate) {
       encoding: 0,
       audio: 0
     });
+    
+    logJobMessage(jobId, "Job initialized");
   }
   
   // Apply updates to in-memory cache
@@ -83,13 +102,18 @@ async function updateProgressAsync(jobId, statusUpdate) {
     if (phaseUpdate.progress !== undefined) {
       const newProgress = phaseUpdate.progress;
       if (newProgress === -1 || newProgress >= jobData[phase]) {
+        const previousProgress = jobData[phase];
         jobData[phase] = newProgress;
         wasUpdated = true;
+        
+        // Log meaningful progress changes
+        if (previousProgress !== newProgress) {
+          logProgressUpdate(jobId, phase, newProgress, phaseUpdate.status);
+        }
       }
-    }
-    
-    // Update status message if provided
-    if (phaseUpdate.status) {
+    } else if (phaseUpdate.status) {
+      // Status update only
+      logProgressUpdate(jobId, phase, undefined, phaseUpdate.status);
       jobData.status = phaseUpdate.status;
       wasUpdated = true;
     }
@@ -98,16 +122,17 @@ async function updateProgressAsync(jobId, statusUpdate) {
   };
   
   // Update each phase
-  let wasUpdated = false;
-  if (statusUpdate.analysis) wasUpdated = updatePhase('analysis', statusUpdate.analysis) || wasUpdated;
-  if (statusUpdate.processing) wasUpdated = updatePhase('processing', statusUpdate.processing) || wasUpdated;
-  if (statusUpdate.encoding) wasUpdated = updatePhase('encoding', statusUpdate.encoding) || wasUpdated;
-  if (statusUpdate.audio) wasUpdated = updatePhase('audio', statusUpdate.audio) || wasUpdated;
+  if (statusUpdate.analysis) updatePhase('analysis', statusUpdate.analysis);
+  if (statusUpdate.processing) updatePhase('processing', statusUpdate.processing);
+  if (statusUpdate.encoding) updatePhase('encoding', statusUpdate.encoding);
+  if (statusUpdate.audio) updatePhase('audio', statusUpdate.audio);
   
   // Check if videoGenerated flag is set
   if (statusUpdate.videoGenerated !== undefined) {
     jobData.videoGenerated = statusUpdate.videoGenerated;
-    wasUpdated = true;
+    if (statusUpdate.videoGenerated) {
+      logJobMessage(jobId, "Video file has been generated");
+    }
   }
   
   // Check for job completion
@@ -136,12 +161,14 @@ async function updateProgressAsync(jobId, statusUpdate) {
     
     // Mark job as completed
     completedJobs.add(jobId);
-    wasUpdated = true;
-  }
-  
-  // If anything was updated, queue a write
-  if (wasUpdated) {
-    queueProgressWrite();
+    
+    // Remove from in-memory cache after a short delay (for backward compatibility)
+    setTimeout(() => {
+      if (completedJobs.has(jobId)) {
+        progressCache.delete(jobId);
+        completedJobs.delete(jobId);
+      }
+    }, 5000);
   }
 }
 
@@ -149,6 +176,7 @@ async function updateProgressAsync(jobId, statusUpdate) {
  * Synchronous version of updateProgress for backward compatibility
  * @param {string} jobId - The job ID
  * @param {Object} statusUpdate - The status update object
+ * @deprecated Use updateProgressAsync instead. File-based progress tracking has been removed.
  */
 function updateProgress(jobId, statusUpdate) {
   try {
@@ -157,24 +185,20 @@ function updateProgress(jobId, statusUpdate) {
       return;
     }
     
-    // Read existing progress data
-    let progressData = {};
-    const progressFilePath = config.PROGRESS_FILE;
-    
-    if (fsSync.existsSync(progressFilePath)) {
-      progressData = JSON.parse(fsSync.readFileSync(progressFilePath, 'utf-8'));
-    }
-    
-    // Initialize job entry if it doesn't exist
-    if (!progressData[jobId]) {
-      progressData[jobId] = {
+    // Initialize job entry if it doesn't exist in memory
+    if (!progressCache.has(jobId)) {
+      progressCache.set(jobId, {
         status: "Initializing...",
         analysis: 0,
         processing: 0,
         encoding: 0,
         audio: 0
-      };
+      });
+      
+      logJobMessage(jobId, "Job initialized");
     }
+    
+    const progressData = progressCache.get(jobId);
     
     // Generalized function to update a specific phase
     const updatePhase = (phase, phaseUpdate) => {
@@ -185,18 +209,21 @@ function updateProgress(jobId, statusUpdate) {
       // Update progress if provided and higher than current (or error state)
       if (phaseUpdate.progress !== undefined) {
         const newProgress = phaseUpdate.progress;
-        if (newProgress === -1 || newProgress >= progressData[jobId][phase]) {
-          progressData[jobId][phase] = newProgress;
+        const previousProgress = progressData[phase];
+        
+        if (newProgress === -1 || newProgress >= progressData[phase]) {
+          progressData[phase] = newProgress;
           wasUpdated = true;
+          
+          // Log meaningful progress changes
+          if (previousProgress !== newProgress) {
+            logProgressUpdate(jobId, phase, newProgress, phaseUpdate.status);
+          }
         }
-      }
-      
-      // Update status message if provided
-      if (phaseUpdate.status) {
-        progressData[jobId].status = phaseUpdate.status;
-        // Centralized logging - determine if this is an error message
-        const isError = phaseUpdate.status.toLowerCase().includes('error');
-        logJobMessage(jobId, phaseUpdate.status, isError);
+      } else if (phaseUpdate.status) {
+        // Status update only
+        progressData.status = phaseUpdate.status;
+        logProgressUpdate(jobId, phase, undefined, phaseUpdate.status);
         wasUpdated = true;
       }
       
@@ -204,158 +231,74 @@ function updateProgress(jobId, statusUpdate) {
     };
     
     // Update each phase if needed
-    const analysisUpdated = updatePhase('analysis', statusUpdate.analysis);
-    const processingUpdated = updatePhase('processing', statusUpdate.processing);
-    const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
-    const audioUpdated = updatePhase('audio', statusUpdate.audio);
+    updatePhase('analysis', statusUpdate.analysis);
+    updatePhase('processing', statusUpdate.processing);
+    updatePhase('encoding', statusUpdate.encoding);
+    updatePhase('audio', statusUpdate.audio);
     
     // Check if videoGenerated flag is set
-    const videoGeneratedUpdated = statusUpdate.videoGenerated !== undefined;
-    if (videoGeneratedUpdated) {
-      progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
+    if (statusUpdate.videoGenerated !== undefined) {
+      progressData.videoGenerated = statusUpdate.videoGenerated;
+      if (statusUpdate.videoGenerated) {
+        logJobMessage(jobId, "Video file has been generated");
+      }
     }
     
-    // Only write to file if anything changed
-    if (analysisUpdated || processingUpdated || encodingUpdated || audioUpdated || videoGeneratedUpdated) {
-      // Check for completion conditions
-      const isComplete = statusUpdate.processing && 
-                         statusUpdate.processing.status === "Processing complete";
-      
-      const hasError = statusUpdate.processing && 
-                       statusUpdate.processing.status && 
-                       statusUpdate.processing.status.startsWith("Error");
-      
-      // Handle job completion - regular completion or error
-      if (isComplete || hasError) {
-        if (isComplete) {
-          // Set final status for regular completion
-          progressData[jobId].status = "Video generation complete";
-          logJobMessage(jobId, "Video generation complete");
-          
-          // Ensure all phases are set to 100% for completion
-          if (!hasError) {
-            progressData[jobId].analysis = 100;
-            progressData[jobId].processing = 100;
-            progressData[jobId].encoding = 100;
-            progressData[jobId].audio = 100;
-          }
+    // Check for completion conditions
+    const isComplete = statusUpdate.processing && 
+                        statusUpdate.processing.status === "Processing complete";
+    
+    const hasError = statusUpdate.processing && 
+                     statusUpdate.processing.status && 
+                     statusUpdate.processing.status.startsWith("Error");
+    
+    // Handle job completion - regular completion or error
+    if (isComplete || hasError) {
+      if (isComplete) {
+        // Set final status for regular completion
+        progressData.status = "Video generation complete";
+        logJobMessage(jobId, "Video generation complete");
+        
+        // Ensure all phases are set to 100% for completion
+        if (!hasError) {
+          progressData.analysis = 100;
+          progressData.processing = 100;
+          progressData.encoding = 100;
+          progressData.audio = 100;
         }
-        
-        // Write the progress file with the completion status
-        fsSync.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
-        
-        // Mark job as completed
-        completedJobs.add(jobId);
-        
-        // Remove the job from progress tracking
-        delete progressData[jobId];
-        logJobMessage(jobId, `Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
-        
-        // Write the updated file without the job
-        fsSync.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
-      } else {
-        // Regular update - write once at the end
-        fsSync.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
       }
+      
+      // Mark job as completed
+      completedJobs.add(jobId);
+      
+      // Log completion
+      logJobMessage(jobId, `Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
+      
+      // Remove from in-memory cache after a short delay (for backward compatibility)
+      setTimeout(() => {
+        if (completedJobs.has(jobId)) {
+          progressCache.delete(jobId);
+          completedJobs.delete(jobId);
+        }
+      }, 5000);
     }
   } catch (err) {
     logJobError(jobId, `Warning: Could not update progress: ${err.message}`, err);
   }
   
-  // Also queue an async update to keep the cache in sync
+  // Also update async tracking for consistency
   updateProgressAsync(jobId, statusUpdate).catch(err => {
     logJobError(jobId, `Warning: Async progress update failed: ${err.message}`, err);
   });
 }
 
 /**
- * Queue a progress write with throttling
+ * Get current progress for a job from memory (for backward compatibility)
+ * @param {string} jobId - The job ID
+ * @returns {Object|null} The job progress data or null if not found
  */
-function queueProgressWrite() {
-  // Add to write queue if not already pending
-  if (writeQueue.length === 0) {
-    writeQueue.push(Date.now());
-    
-    // Process the queue if not already processing
-    if (!isWriting) {
-      processWriteQueue();
-    }
-  }
-}
-
-/**
- * Process the write queue with throttling
- */
-async function processWriteQueue() {
-  if (writeQueue.length === 0) {
-    isWriting = false;
-    return;
-  }
-  
-  isWriting = true;
-  
-  try {
-    // Write current state to disk
-    await writeProgressToDisk();
-    
-    // Clear the queue
-    writeQueue = [];
-    
-    // Schedule next check after delay
-    setTimeout(() => {
-      processWriteQueue();
-    }, WRITE_THROTTLE_MS);
-  } catch (error) {
-    console.error('Error writing progress file:', error);
-    isWriting = false;
-    
-    // Retry after delay
-    setTimeout(() => {
-      if (writeQueue.length > 0) {
-        processWriteQueue();
-      }
-    }, WRITE_THROTTLE_MS);
-  }
-}
-
-/**
- * Write the current progress state to disk
- */
-async function writeProgressToDisk() {
-  try {
-    const progressFilePath = path.resolve(process.cwd(), config.PROGRESS_FILE);
-    
-    // Convert cache to the format needed for the file
-    const progressData = {};
-    for (const [jobId, data] of progressCache.entries()) {
-      // Skip completed jobs
-      if (completedJobs.has(jobId)) continue;
-      
-      progressData[jobId] = { ...data };
-    }
-    
-    // Write to file
-    await fs.writeFile(progressFilePath, JSON.stringify(progressData, null, 2));
-    
-    // Cleanup completed jobs from memory periodically
-    cleanupCompletedJobs();
-  } catch (error) {
-    console.warn(`Warning: Could not update progress file: ${error.message}`);
-    throw error; // Re-throw to handle in caller
-  }
-}
-
-/**
- * Remove completed jobs from the cache after a certain time
- */
-function cleanupCompletedJobs() {
-  // Remove completed jobs from memory after they've been processed
-  for (const jobId of completedJobs) {
-    progressCache.delete(jobId);
-  }
-  
-  // Clear completed jobs only if they've been persisted
-  completedJobs.clear();
+function getJobProgress(jobId) {
+  return progressCache.has(jobId) ? { ...progressCache.get(jobId) } : null;
 }
 
 // Export functions
@@ -363,5 +306,6 @@ module.exports = {
   updateProgress,       // Sync version for backward compatibility
   updateProgressAsync,  // Async version for better performance
   logJobMessage,        // For general job logging
-  logJobError           // For job error logging
+  logJobError,          // For job error logging
+  getJobProgress        // For backward compatibility with code that reads progress
 }; 
