@@ -91,11 +91,6 @@ app.post('/process-reel', async (req, res) => {
         // Run analysis (progress will be updated by the function)
         const analysis = await analizeVideo(input, jobId);
         
-        // Mark analysis as complete
-        updateProgress(jobId, {
-          analysis: { progress: 100, status: "Analysis complete" }
-        });
-        
         const result = await processVideo(input, outputPath, analysis, jobId);
       } catch (error) {
         logJobError(jobId, `Error processing: ${error.message}`, error);
