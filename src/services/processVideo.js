@@ -5,50 +5,15 @@ const ffmpeg = require('fluent-ffmpeg');
 const cv = require('@u4/opencv4nodejs');
 const crypto = require('crypto');
 
-// Configuration constants
-const CONFIG = {
-  // Video processing constants
-  DEFAULT_CENTER: 0.5,        // Normalized center position (50%)
-  ASPECT_RATIO: 9 / 16,       // Output crop aspect ratio (portrait)
-  SCENE_CHANGE_THRESHOLD: 3000, // Threshold for scene change detection
-  BATCH_SIZE: 10,             // Batch size for frame processing
-  
-  // Video encoding settings
-  ENCODING: {
-    PRESET: 'medium',         // FFmpeg preset (balance between speed and quality)
-    CRF: 18,                  // Constant Rate Factor (lower = higher quality, 18 is "visually lossless")
-    PIXEL_FORMAT: 'yuv420p'   // Standard pixel format for maximum compatibility
-  },
-  
-  // Progress tracking settings
-  PROGRESS: {
-    UPDATE_INTERVAL_MS: 1000, // How often to update progress (milliseconds)
-    PROCESSING_PHASES: {      // Processing phases with weights (must sum to 1)
-      PREPARATION: { weight: 0.05, description: "Preparing for processing" },
-      FRAME_CROPPING: { weight: 0.70, description: "Processing frames" },
-      ENCODING: { weight: 0.20, description: "Encoding video" },
-      AUDIO_MERGING: { weight: 0.05, description: "Adding audio" }
-    }
-  },
-  
-  // ID generation
-  DEFAULT_ID_LENGTH: 10,      // Default length for random job IDs
-  
-  // File paths
-  PROGRESS_FILE: 'progress.json',
-  TEMP_DIR_NAME: 'temp',
-  FRAMES_DIR_NAME: 'frames',
-  PROCESSING_DIR_NAME: 'processing',
-  TEMP_INPUT_NAME: 'input.mp4',
-  TEMP_OUTPUT_NAME: 'output.mp4'
-};
+// Import configuration from central config.js
+const config = require('../config/config');
 
 /**
  * Generate a random alphanumeric ID
- * @param {number} [length=CONFIG.DEFAULT_ID_LENGTH] - Length of the ID
+ * @param {number} [length=config.DEFAULT_ID_LENGTH] - Length of the ID
  * @returns {string} - Random alphanumeric ID
  */
-function generateRandomId(length = CONFIG.DEFAULT_ID_LENGTH) {
+function generateRandomId(length = config.DEFAULT_ID_LENGTH) {
   return crypto.randomBytes(Math.ceil(length / 2))
     .toString('hex')
     .slice(0, length);
@@ -96,7 +61,7 @@ class MovementPlanner {
     this.fps = fps;
     this.currentSceneStart = 0;
     this.waitingForDetection = false;
-    this.defaultX = CONFIG.DEFAULT_CENTER;
+    this.defaultX = config.DEFAULT_CENTER;
     this.smoothingRate = 0.05;
     this.maxMovementPerFrame = 0.03;
     
@@ -392,7 +357,7 @@ function updateProgress(jobId, statusUpdate) {
 
     // Read existing progress data once
     let progressData = {};
-    const progressFilePath = CONFIG.PROGRESS_FILE;
+    const progressFilePath = config.PROGRESS_FILE;
     
     if (fs.existsSync(progressFilePath)) {
       progressData = JSON.parse(fs.readFileSync(progressFilePath, 'utf-8'));
@@ -492,7 +457,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   console.log(`Job ID [${processingId}]: Processing video`);
   
   // Use processing phases from config
-  const processingPhases = CONFIG.PROGRESS.PROCESSING_PHASES;
+  const processingPhases = config.PROGRESS.PROCESSING_PHASES;
   
   // Simplified progress tracking function
   function updatePhaseProgress(phase, phaseProgress = 1) {
@@ -501,6 +466,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     const phaseInfo = processingPhases[phaseKey];
     
     if (!phaseInfo) return 0;
+    
+    // Skip deprecated phases or just update with minimal impact
+    if (phaseInfo.deprecated) {
+      // For deprecated phases, still log but don't update progress
+      console.log(`Job ID [${processingId}]: Phase ${phase} (deprecated): ${Math.floor(phaseProgress * 100)}%`);
+      return 0;
+    }
     
     // Calculate percentage for this phase
     const phasePercentage = Math.floor(phaseProgress * 100);
@@ -511,60 +483,66 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       statusMessage = "Processing complete";
     }
     
-    // Determine which progress fields to update
-    const progressUpdate = {
-      processing: { 
-        status: statusMessage
-      }
-    };
+    // Create progress update based on the phase
+    let progressUpdate = {};
     
-    // Special handling for different phases
     if (phase === 'frameCropping') {
-      // For frameCropping, use direct percentage for processing
-      progressUpdate.processing.progress = phasePercentage;
-    } else if (phase === 'encoding') {
-      // For encoding, update both fields
-      progressUpdate.processing.progress = calculateOverallProgress(phase, phaseProgress);
-      progressUpdate.encoding = {
-        progress: phasePercentage,
-        status: statusMessage
+      // Frame cropping is the only thing that affects the 'processing' progress now
+      progressUpdate = {
+        processing: { 
+          progress: phasePercentage,
+          status: statusMessage
+        }
       };
-    } else {
-      // For other phases, use weighted overall progress
-      progressUpdate.processing.progress = calculateOverallProgress(phase, phaseProgress);
+    } else if (phase === 'encoding') {
+      // Encoding updates its own progress tracker
+      progressUpdate = {
+        encoding: {
+          progress: phasePercentage,
+          status: statusMessage
+        }
+      };
+      
+      // Only mark processing as complete when encoding is done
+      if (phaseProgress === 1) {
+        progressUpdate.processing = {
+          status: "Processing complete"
+        };
+      }
     }
     
     // Update progress
     updateProgress(processingId, progressUpdate);
     
-    return progressUpdate.processing.progress;
+    return progressUpdate.processing ? progressUpdate.processing.progress : 0;
   }
   
   // Helper to calculate overall weighted progress
   function calculateOverallProgress(currentPhase, currentProgress) {
-    let totalProgress = 0;
-    let phaseFound = false;
-    
-    for (const [phaseName, phaseInfo] of Object.entries(processingPhases)) {
-      if (phaseName === currentPhase) {
-        totalProgress += phaseInfo.weight * currentProgress;
-        phaseFound = true;
-      } else if (!phaseFound) {
-        totalProgress += phaseInfo.weight; // Add 100% for completed phases
-      }
+    // If we're in frame cropping phase, it's the only phase that matters for processing now
+    if (currentPhase === 'FRAME_CROPPING') {
+      return Math.floor(currentProgress * 100);
     }
     
-    return Math.floor(totalProgress * 100);
+    // For other phases that might still be called but are deprecated
+    const phaseInfo = processingPhases[currentPhase];
+    if (phaseInfo && phaseInfo.deprecated) {
+      // For deprecated phases, don't affect the progress calculation
+      return 0;
+    }
+    
+    // Fallback (shouldn't be reached with new config)
+    return 0;
   }
   
   // Set up directories
   const projectRoot = process.cwd();
-  const tempBaseDir = path.join(projectRoot, CONFIG.TEMP_DIR_NAME);
+  const tempBaseDir = path.join(projectRoot, config.TEMP_DIR_NAME);
   const tempDir = analysis.tempDir || path.join(tempBaseDir, processingId);
-  const framesDir = path.join(tempDir, CONFIG.FRAMES_DIR_NAME);
-  const processingFramesDir = path.join(framesDir, CONFIG.PROCESSING_DIR_NAME);
-  const tempInputPath = path.join(tempDir, CONFIG.TEMP_INPUT_NAME);
-  const tempOutputPath = path.join(tempDir, CONFIG.TEMP_OUTPUT_NAME);
+  const framesDir = path.join(tempDir, config.FRAMES_DIR_NAME);
+  const processingFramesDir = path.join(framesDir, config.PROCESSING_DIR_NAME);
+  const tempInputPath = path.join(tempDir, config.TEMP_INPUT_NAME);
+  const tempOutputPath = path.join(tempDir, config.TEMP_OUTPUT_NAME);
   
   // Create all directories at once with recursive option
   const dirsToCreate = [
@@ -604,7 +582,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     
     // Calculate crop dimensions for 9:16 aspect ratio
     const { width, height, fps, totalFrames } = videoMetadata;
-    const actualCropWidth = Math.round(height * CONFIG.ASPECT_RATIO);
+    const actualCropWidth = Math.round(height * config.ASPECT_RATIO);
     
     // Process the entire video
     const startFrame = 0;
@@ -648,7 +626,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       // Determine the center position (from analysis or default)
       const normCenter = positionIndex < smoothedPositions.length
         ? smoothedPositions[positionIndex]
-        : CONFIG.DEFAULT_CENTER;
+        : config.DEFAULT_CENTER;
       
       // Process the video frame
       const { croppedFrame, grayFrame, frameDiff } = processVideoFrame(frame, {
@@ -677,7 +655,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       );
       
       // Process in batches to avoid too many open files
-      if (framePromises.length >= CONFIG.BATCH_SIZE) {
+      if (framePromises.length >= config.BATCH_SIZE) {
         await Promise.all(framePromises);
         framePromises.length = 0;
       }
@@ -688,7 +666,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       
       // Report progress periodically
       const now = Date.now();
-      if (now - lastProgressReport > CONFIG.PROGRESS.UPDATE_INTERVAL_MS) {
+      if (now - lastProgressReport > config.PROGRESS.UPDATE_INTERVAL_MS) {
         // Calculate frame cropping phase progress (0-1)
         const framesProgress = processedFrames / totalFramesToProcess;
         
@@ -850,7 +828,7 @@ function processVideoFrame(frame, options) {
     frameDiff = mse(grayFrame, prevGrayFrame);
     
     // Log scene changes
-    if (frameDiff > CONFIG.SCENE_CHANGE_THRESHOLD) {
+    if (frameDiff > config.SCENE_CHANGE_THRESHOLD) {
       console.log(`Job ID [${jobId}]: Scene change detected at frame ${currentFrame}`);
     }
   }
@@ -882,9 +860,9 @@ async function encodeVideo(framesDir, outputPath, fps, progressCallback) {
       ])
       .outputOptions([
         '-c:v', 'libx264',
-        '-preset', CONFIG.ENCODING.PRESET,
-        '-crf', CONFIG.ENCODING.CRF.toString(),
-        '-pix_fmt', CONFIG.ENCODING.PIXEL_FORMAT
+        '-preset', config.ENCODING.PRESET,
+        '-crf', config.ENCODING.CRF.toString(),
+        '-pix_fmt', config.ENCODING.PIXEL_FORMAT
       ])
       .output(outputPath)
       .on('progress', (progress) => {
