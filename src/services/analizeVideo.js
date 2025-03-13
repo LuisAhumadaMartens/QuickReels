@@ -10,7 +10,7 @@ const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 const config = require('../config/config');
 const { generateRandomId } = require('./processVideo');
-const { updateProgress } = require('../utils/progressTracker');
+const { updateProgress, logJobMessage, logJobError } = require('../utils/progressTracker');
 
 // Set the ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -266,7 +266,7 @@ function formatTimecode(seconds) {
  */
 async function analizeVideo(inputPath, jobId = null) {
   const processingId = jobId || generateRandomId();
-  console.log(`Job ID [${processingId}]: Analyzing video`);
+  logJobMessage(processingId, "Analyzing video");
   
   try {
     // If we have a job ID, update progress
@@ -358,7 +358,7 @@ async function analizeVideo(inputPath, jobId = null) {
         return numA - numB;
       });
     
-    console.log(`Job ID [${processingId}]: Found ${frameFiles.length} frames for analysis`);
+    logJobMessage(processingId, `Found ${frameFiles.length} frames for analysis`);
     
     // Initialize movement planner
     const planner = new MovementPlanner(metadata.fps);
@@ -446,7 +446,7 @@ async function analizeVideo(inputPath, jobId = null) {
               }
             });
             
-            // Don't log here - updateProgress() likely already logs this message
+            // Don't log here - updateProgress() already logs this message
             lastReportedProgress = progress;
           }
         }
@@ -477,7 +477,7 @@ async function analizeVideo(inputPath, jobId = null) {
       tempDir: tempDir
     };
   } catch (error) {
-    console.error(`Job ID [${processingId}]: Error analyzing video: ${error.message}`);
+    logJobError(processingId, `Error analyzing video: ${error.message}`, error);
     
     // Update progress with error if we have a job ID
     if (jobId) {

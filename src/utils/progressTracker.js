@@ -21,6 +21,34 @@ let isWriting = false;
 const WRITE_THROTTLE_MS = 1000; // 1 second
 
 /**
+ * Centralized logging for job progress and status 
+ * @param {string} jobId - The job ID
+ * @param {string} message - The message to log
+ * @param {boolean} isError - Whether this is an error message
+ */
+function logJobMessage(jobId, message, isError = false) {
+  const logPrefix = `Job ID [${jobId}]:`;
+  if (isError) {
+    console.error(`${logPrefix} ${message}`);
+  } else {
+    console.log(`${logPrefix} ${message}`);
+  }
+}
+
+/**
+ * Log an error message for a job
+ * @param {string} jobId - The job ID
+ * @param {string} message - The error message
+ * @param {Error} [error] - Optional error object for stack trace
+ */
+function logJobError(jobId, message, error = null) {
+  logJobMessage(jobId, message, true);
+  if (error && error.stack) {
+    console.error(`Job ID [${jobId}]: Stack trace: ${error.stack}`);
+  }
+}
+
+/**
  * Update progress in memory and queue a write (async implementation)
  * @param {string} jobId - The job ID
  * @param {Object} statusUpdate - The status update object
@@ -63,7 +91,6 @@ async function updateProgressAsync(jobId, statusUpdate) {
     // Update status message if provided
     if (phaseUpdate.status) {
       jobData.status = phaseUpdate.status;
-      console.log(`Job ID [${jobId}]: ${phaseUpdate.status}`);
       wasUpdated = true;
     }
     
@@ -96,7 +123,7 @@ async function updateProgressAsync(jobId, statusUpdate) {
     if (isComplete) {
       // Set final status for regular completion
       jobData.status = "Video generation complete";
-      console.log(`Job ID [${jobId}]: Video generation complete`);
+      logJobMessage(jobId, "Video generation complete");
       
       // Ensure all phases are set to 100% for completion
       if (!hasError) {
@@ -167,7 +194,9 @@ function updateProgress(jobId, statusUpdate) {
       // Update status message if provided
       if (phaseUpdate.status) {
         progressData[jobId].status = phaseUpdate.status;
-        console.log(`Job ID [${jobId}]: ${phaseUpdate.status}`);
+        // Centralized logging - determine if this is an error message
+        const isError = phaseUpdate.status.toLowerCase().includes('error');
+        logJobMessage(jobId, phaseUpdate.status, isError);
         wasUpdated = true;
       }
       
@@ -201,7 +230,7 @@ function updateProgress(jobId, statusUpdate) {
         if (isComplete) {
           // Set final status for regular completion
           progressData[jobId].status = "Video generation complete";
-          console.log(`Job ID [${jobId}]: Video generation complete`);
+          logJobMessage(jobId, "Video generation complete");
           
           // Ensure all phases are set to 100% for completion
           if (!hasError) {
@@ -220,7 +249,7 @@ function updateProgress(jobId, statusUpdate) {
         
         // Remove the job from progress tracking
         delete progressData[jobId];
-        console.log(`Job ID [${jobId}]: Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
+        logJobMessage(jobId, `Job ${hasError ? 'completed with error' : 'completed'}, removed from tracking`);
         
         // Write the updated file without the job
         fsSync.writeFileSync(progressFilePath, JSON.stringify(progressData, null, 2));
@@ -230,12 +259,12 @@ function updateProgress(jobId, statusUpdate) {
       }
     }
   } catch (err) {
-    console.warn(`Job ID [${jobId}]: Warning: Could not update progress: ${err.message}`);
+    logJobError(jobId, `Warning: Could not update progress: ${err.message}`, err);
   }
   
   // Also queue an async update to keep the cache in sync
   updateProgressAsync(jobId, statusUpdate).catch(err => {
-    console.warn(`Job ID [${jobId}]: Warning: Async progress update failed: ${err.message}`);
+    logJobError(jobId, `Warning: Async progress update failed: ${err.message}`, err);
   });
 }
 
@@ -333,4 +362,6 @@ function cleanupCompletedJobs() {
 module.exports = {
   updateProgress,       // Sync version for backward compatibility
   updateProgressAsync,  // Async version for better performance
+  logJobMessage,        // For general job logging
+  logJobError           // For job error logging
 }; 

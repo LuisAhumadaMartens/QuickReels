@@ -12,7 +12,7 @@ const portManager = require('./src/services/portManager');
 const apiRoutes = require('./src/routes/api');
 const { analizeVideo } = require('./src/services/analizeVideo');
 const { processVideo, generateRandomId } = require('./src/services/processVideo');
-const { updateProgress } = require('./src/utils/progressTracker');
+const { updateProgress, logJobMessage, logJobError } = require('./src/utils/progressTracker');
 
 
 // ------------------------------------------------------------
@@ -98,7 +98,7 @@ app.post('/process-reel', async (req, res) => {
         
         const result = await processVideo(input, outputPath, analysis, jobId);
       } catch (error) {
-        console.error(`Job ID [${jobId}]: Error processing: ${error.message}`);
+        logJobError(jobId, `Error processing: ${error.message}`, error);
         
         // Determine which stage had the error
         if (error.message.includes('analiz') || error.message.includes('analys')) {

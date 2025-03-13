@@ -8,7 +8,7 @@ const crypto = require('crypto');
 // Import configuration from central config.js
 const config = require('../config/config');
 // Import the progress tracker
-const { updateProgress } = require('../utils/progressTracker');
+const { updateProgress, logJobMessage, logJobError } = require('../utils/progressTracker');
 
 /**
  * Generate a random alphanumeric ID
@@ -353,7 +353,7 @@ const completedJobs = new Set();
 async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   // Use the job ID from analysis if available, otherwise generate a new one
   const processingId = analysis.jobId || jobId || generateRandomId();
-  console.log(`Job ID [${processingId}]: Processing video`);
+  logJobMessage(processingId, "Processing video");
   
   // Use processing phases from config
   const processingPhases = config.PROGRESS.PROCESSING_PHASES;
@@ -510,7 +510,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
           try {
             await cv.imwriteAsync(framePath, croppedFrame);
           } catch (err) {
-            console.error(`Job ID [${processingId}]: Error writing frame ${currentFrame}: ${err.message}`);
+            logJobError(processingId, `Error writing frame ${currentFrame}: ${err.message}`);
           }
         })()
       );
@@ -560,19 +560,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Add audio to the video
     await addAudioToVideo(tempOutputPath, tempInputPath, outputPath, processingId);
     
-    // Update progress to 100% when processing is complete
+    // Update progress to 100% when processing is complete - avoid duplicates from individual functions
     updateProgress(processingId, {
       processing: {
         progress: 100,
         status: "Processing complete"
-      },
-      encoding: {
-        progress: 100,
-        status: "Encoding complete"
-      },
-      audio: {
-        progress: 100,
-        status: "Audio merging complete"
       },
       videoGenerated: true
     });
@@ -581,7 +573,7 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
     } catch (err) {
-      console.warn(`Job ID [${processingId}]: Warning: Failed to clean up temporary directory: ${err.message}`);
+      logJobError(processingId, `Warning: Failed to clean up temporary directory: ${err.message}`);
     }
     
     return {
@@ -591,9 +583,9 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
       status: 'completed'
     };
   } catch (error) {
-    console.error(`Job ID [${processingId}]: Error processing video: ${error.message}`);
+    logJobError(processingId, `Error processing video: ${error.message}`, error);
     
-    // Update progress to show error
+    // Update progress with error
     updateProgress(processingId, {
       processing: { progress: -1, status: `Error: ${error.message}` }
     });
@@ -620,7 +612,7 @@ function extractVideoMetadata(analysis, video, jobId) {
       analysis.metadata.fps) {
     // Use metadata from analysis if complete
     videoMetadata = analysis.metadata;
-    console.log(`Job ID [${jobId}]: Using metadata from analysis`);
+    logJobMessage(jobId, "Using metadata from analysis");
   } else {
     // Get metadata directly from video file
     videoMetadata = {
@@ -629,7 +621,7 @@ function extractVideoMetadata(analysis, video, jobId) {
       fps: video.get(cv.CAP_PROP_FPS),
       totalFrames: Math.floor(video.get(cv.CAP_PROP_FRAME_COUNT))
     };
-    console.log(`Job ID [${jobId}]: Using metadata from video file`);
+    logJobMessage(jobId, "Using metadata from video file");
   }
   
   return videoMetadata;
@@ -680,7 +672,7 @@ function processVideoFrame(frame, options) {
     
     // Log scene changes
     if (frameDiff > config.SCENE_CHANGE_THRESHOLD) {
-      console.log(`Job ID [${jobId}]: Scene change detected at frame ${currentFrame}`);
+      logJobMessage(jobId, `Scene change detected at frame ${currentFrame}`);
     }
   }
   
@@ -726,7 +718,6 @@ async function encodeVideo(framesDir, outputPath, fps, jobId) {
               status: `Encoding: ${percent}%`
             }
           });
-          console.log(`Job ID [${jobId}]: Encoding: ${percent}%`);
         }
       })
       .on('end', () => {
@@ -737,7 +728,6 @@ async function encodeVideo(framesDir, outputPath, fps, jobId) {
             status: "Encoding complete"
           }
         });
-        console.log(`Job ID [${jobId}]: Encoding complete`);
         resolve();
       })
       .on('error', (err) => {
@@ -748,7 +738,6 @@ async function encodeVideo(framesDir, outputPath, fps, jobId) {
             status: `Encoding error: ${err.message}`
           }
         });
-        console.error(`Job ID [${jobId}]: Encoding error: ${err.message}`);
         reject(err);
       })
       .run();
@@ -786,7 +775,6 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
               status: `Adding audio: ${percent}%`
             }
           });
-          console.log(`Job ID [${jobId}]: Adding audio: ${percent}%`);
         }
       })
       .on('end', () => {
@@ -797,7 +785,6 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
             status: "Audio merging complete"
           }
         });
-        console.log(`Job ID [${jobId}]: Audio merging complete`);
         resolve();
       })
       .on('error', (err) => {
@@ -808,7 +795,6 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
             status: `Audio merging error: ${err.message}`
           }
         });
-        console.error(`Job ID [${jobId}]: Audio merging error: ${err.message}`);
         reject(err);
       })
       .run();
