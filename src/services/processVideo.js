@@ -346,7 +346,6 @@ const completedJobs = new Set();
  * @param {Object} statusUpdate - The status update object containing progress and status information
  * @param {Object} [statusUpdate.analysis] - Analysis phase status
  * @param {Object} [statusUpdate.processing] - Processing phase status
- * @param {Object} [statusUpdate.encoding] - Encoding phase status
  */
 function updateProgress(jobId, statusUpdate) {
   try {
@@ -368,8 +367,8 @@ function updateProgress(jobId, statusUpdate) {
       progressData[jobId] = {
         status: "Initializing...",
         analysis: 0,
-        processing: 0,
-        encoding: 0
+        processing: 0
+        // encoding field has been deprecated
       };
     }
     
@@ -401,10 +400,11 @@ function updateProgress(jobId, statusUpdate) {
     // Update each phase if needed
     const analysisUpdated = updatePhase('analysis', statusUpdate.analysis);
     const processingUpdated = updatePhase('processing', statusUpdate.processing);
-    const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
+    // Encoding phase is deprecated - no longer tracked in progress.json
+    // const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
     
     // Only write to file if anything changed
-    if (analysisUpdated || processingUpdated || encodingUpdated) {
+    if (analysisUpdated || processingUpdated) {
       // Check for completion conditions
       const isComplete = statusUpdate.processing && 
                          statusUpdate.processing.status === "Processing complete";
@@ -461,77 +461,84 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
   
   // Simplified progress tracking function
   function updatePhaseProgress(phase, phaseProgress = 1) {
-    // Convert phase name to config key format (e.g., "frameCropping" → "FRAME_CROPPING")
+    // Convert phase name to config key format
     const phaseKey = phase.replace(/([A-Z])/g, '_$1').toUpperCase();
     const phaseInfo = processingPhases[phaseKey];
     
     if (!phaseInfo) return 0;
     
-    // Skip deprecated phases or just update with minimal impact
-    if (phaseInfo.deprecated) {
-      // For deprecated phases, still log but don't update progress
-      console.log(`Job ID [${processingId}]: Phase ${phase} (deprecated): ${Math.floor(phaseProgress * 100)}%`);
-      return 0;
-    }
-    
     // Calculate percentage for this phase
     const phasePercentage = Math.floor(phaseProgress * 100);
     
-    // Create the status message
-    let statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
-    if (phase === 'audioMerging' && phaseProgress === 1) {
-      statusMessage = "Processing complete";
-    }
-    
-    // Create progress update based on the phase
-    let progressUpdate = {};
-    
+    // Handle different phases
     if (phase === 'frameCropping') {
-      // Frame cropping is the only thing that affects the 'processing' progress now
-      progressUpdate = {
+      // For frame cropping (50% of total processing)
+      const adjustedProgress = Math.floor(phasePercentage * 0.5); // 50% of processing is frame cropping
+      
+      // Create the status message
+      const statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
+      
+      // Update processing progress
+      const progressUpdate = {
         processing: { 
-          progress: phasePercentage,
-          status: statusMessage
-        }
-      };
-    } else if (phase === 'encoding') {
-      // Encoding updates its own progress tracker
-      progressUpdate = {
-        encoding: {
-          progress: phasePercentage,
+          progress: adjustedProgress,
           status: statusMessage
         }
       };
       
-      // Only mark processing as complete when encoding is done
-      if (phaseProgress === 1) {
-        progressUpdate.processing = {
-          status: "Processing complete"
-        };
-      }
+      // Update progress
+      updateProgress(processingId, progressUpdate);
+      
+      return adjustedProgress;
+    } 
+    else if (phase === 'encoding') {
+      // For encoding (40% of total processing, from 50-90%)
+      const adjustedProgress = 50 + Math.floor(phasePercentage * 0.4); // 40% of processing is encoding
+      
+      // Create the status message - show the actual encoding percentage
+      const statusMessage = `Encoding: ${phasePercentage}%`;
+      
+      // Update processing progress
+      const progressUpdate = {
+        processing: { 
+          progress: adjustedProgress,
+          status: statusMessage
+        }
+      };
+      
+      // Update progress
+      updateProgress(processingId, progressUpdate);
+      
+      // Also log to console
+      console.log(`Encoding: ${phasePercentage}%`);
+      
+      return adjustedProgress;
+    }
+    else if (phase === 'audioMerging') {
+      // For audio merging (10% of total processing, from 90-100%)
+      const adjustedProgress = 90 + Math.floor(phasePercentage * 0.1); // 10% of processing is audio
+      
+      // Create the status message - show the actual audio merging percentage
+      const statusMessage = `Adding audio: ${phasePercentage}%`;
+      
+      // Update processing progress
+      const progressUpdate = {
+        processing: { 
+          progress: adjustedProgress,
+          status: statusMessage
+        }
+      };
+      
+      // Update progress
+      updateProgress(processingId, progressUpdate);
+      
+      // Also log to console
+      console.log(`Adding audio: ${phasePercentage}%`);
+      
+      return adjustedProgress;
     }
     
-    // Update progress
-    updateProgress(processingId, progressUpdate);
-    
-    return progressUpdate.processing ? progressUpdate.processing.progress : 0;
-  }
-  
-  // Helper to calculate overall weighted progress
-  function calculateOverallProgress(currentPhase, currentProgress) {
-    // If we're in frame cropping phase, it's the only phase that matters for processing now
-    if (currentPhase === 'FRAME_CROPPING') {
-      return Math.floor(currentProgress * 100);
-    }
-    
-    // For other phases that might still be called but are deprecated
-    const phaseInfo = processingPhases[currentPhase];
-    if (phaseInfo && phaseInfo.deprecated) {
-      // For deprecated phases, don't affect the progress calculation
-      return 0;
-    }
-    
-    // Fallback (shouldn't be reached with new config)
+    // Any other phase (like preparation) - don't update progress.json
     return 0;
   }
   
@@ -684,21 +691,11 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     // Release resources
     video.release();
     
-    // Frame cropping complete, starting encoding
+    // Frame cropping complete
     updatePhaseProgress('frameCropping', 1);
-    updatePhaseProgress('encoding', 0);
     
     // Encode the video
-    await encodeVideo(
-      processingFramesDir, 
-      tempOutputPath, 
-      fps, 
-      progress => updatePhaseProgress('encoding', progress)
-    );
-    
-    // Encoding complete, starting audio merging
-    updatePhaseProgress('encoding', 1);
-    updatePhaseProgress('audioMerging', 0);
+    await encodeVideo(processingFramesDir, tempOutputPath, fps);
     
     // Create output directory if it doesn't exist
     const outputDir = path.dirname(outputPath);
@@ -707,19 +704,10 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     }
     
     // Add audio to the video
-    await addAudioToVideo(
-      tempOutputPath, 
-      tempInputPath, 
-      outputPath, 
-      progress => updatePhaseProgress('audioMerging', progress)
-    );
+    await addAudioToVideo(tempOutputPath, tempInputPath, outputPath);
     
-    // Update progress to 100% when audio is added and file is saved
+    // Update progress to 100% when processing is complete
     updateProgress(processingId, {
-      encoding: { 
-        progress: 100,
-        status: "Encoding complete"
-      },
       processing: {
         progress: 100,
         status: "Processing complete"
@@ -848,10 +836,9 @@ function processVideoFrame(frame, options) {
  * @param {string} framesDir - Directory containing processed frames
  * @param {string} outputPath - Path for output video
  * @param {number} fps - Frames per second
- * @param {Function} progressCallback - Callback for progress updates
  * @returns {Promise<void>}
  */
-async function encodeVideo(framesDir, outputPath, fps, progressCallback) {
+async function encodeVideo(framesDir, outputPath, fps) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(path.join(framesDir, 'frame_%08d.png'))
@@ -866,11 +853,9 @@ async function encodeVideo(framesDir, outputPath, fps, progressCallback) {
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        // FFmpeg reports progress as a percentage
-        if (progress.percent) {
-          const encodingProgress = progress.percent / 100;
-          // Update encoding phase progress via callback
-          progressCallback(encodingProgress);
+        // Basic logging for monitoring
+        if (progress && progress.percent) {
+          console.log(`Encoding: ${Math.floor(progress.percent)}%`);
         }
       })
       .on('end', resolve)
@@ -884,10 +869,9 @@ async function encodeVideo(framesDir, outputPath, fps, progressCallback) {
  * @param {string} videoPath - Path to encoded video without audio
  * @param {string} audioSource - Path to audio source
  * @param {string} outputPath - Path for final output with audio
- * @param {Function} progressCallback - Callback for progress updates
  * @returns {Promise<void>}
  */
-async function addAudioToVideo(videoPath, audioSource, outputPath, progressCallback) {
+async function addAudioToVideo(videoPath, audioSource, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
@@ -901,10 +885,9 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, progressCallb
       ])
       .output(outputPath)
       .on('progress', (progress) => {
-        if (progress.percent) {
-          const audioProgress = progress.percent / 100;
-          // Update audio merging phase progress via callback
-          progressCallback(audioProgress);
+        // Basic logging for monitoring
+        if (progress && progress.percent) {
+          console.log(`Adding audio: ${Math.floor(progress.percent)}%`);
         }
       })
       .on('end', resolve)

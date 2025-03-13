@@ -75,7 +75,8 @@ app.post('/process-reel', async (req, res) => {
       return sendErrorResponse(res, 400, 'Invalid output path', 'INVALID_OUTPUT_PATH');
     }
     
-    // Initialize progress tracking with the new structure
+    // Initialize progress tracking with the simplified structure
+    // Note: No encoding field - only analysis and processing
     updateProgress(jobId, {
       analysis: { progress: 0, status: "Starting video analysis..." },
       processing: { progress: 0, status: "Waiting for analysis to complete" },
@@ -146,7 +147,8 @@ app.get('/status/:jobId', (req, res) => {
     
     const jobStatus = progressData[jobId];
     
-    // Calculate overall progress (weighted: 30% analysis, 70% processing)
+    // Calculate overall progress (analysis: 30%, processing: 70%)
+    // Note: encoding/audio phases are now deprecated and not included
     const analysisProgress = jobStatus.analysis?.progress || 0;
     const processingProgress = jobStatus.processing?.progress || 0;
     const overallProgress = Math.round(
@@ -164,6 +166,9 @@ app.get('/status/:jobId', (req, res) => {
       if (processingProgress === -1) {
         currentPhase = "error";
         currentStatus = jobStatus.processing?.status || "Error in processing";
+      } else if (processingProgress === 100) {
+        currentPhase = "complete";
+        currentStatus = "Processing complete";
       } else {
         currentPhase = "processing";
         currentStatus = jobStatus.processing?.status || "Processing video";
@@ -177,13 +182,19 @@ app.get('/status/:jobId', (req, res) => {
     }
     
     // Return the job status with additional info
-    return sendSuccessResponse(res, {
+    // Remove encoding from the response by creating a clean response object
+    const responseData = {
       jobId,
       currentPhase,
       currentStatus,
       overallProgress,
-      ...jobStatus
-    });
+      status: jobStatus.status,
+      analysis: jobStatus.analysis,
+      processing: jobStatus.processing,
+      videoGenerated: jobStatus.videoGenerated
+    };
+    
+    return sendSuccessResponse(res, responseData);
   } catch (error) {
     console.error(`Error checking job status: ${error.message}`);
     return sendErrorResponse(res, 500, `Error checking job status: ${error.message}`, 'STATUS_CHECK_ERROR');
