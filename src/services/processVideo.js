@@ -406,8 +406,14 @@ function updateProgress(jobId, statusUpdate) {
     const encodingUpdated = updatePhase('encoding', statusUpdate.encoding);
     const audioUpdated = updatePhase('audio', statusUpdate.audio);
     
+    // Check if videoGenerated flag is set
+    const videoGeneratedUpdated = statusUpdate.videoGenerated !== undefined;
+    if (videoGeneratedUpdated) {
+      progressData[jobId].videoGenerated = statusUpdate.videoGenerated;
+    }
+    
     // Only write to file if anything changed
-    if (analysisUpdated || processingUpdated || encodingUpdated || audioUpdated) {
+    if (analysisUpdated || processingUpdated || encodingUpdated || audioUpdated || videoGeneratedUpdated) {
       // Check for completion conditions
       const isComplete = statusUpdate.processing && 
                          statusUpdate.processing.status === "Processing complete";
@@ -422,6 +428,14 @@ function updateProgress(jobId, statusUpdate) {
           // Set final status for regular completion
           progressData[jobId].status = "Video generation complete";
           console.log(`Job ID [${jobId}]: Video generation complete`);
+          
+          // Ensure all phases are set to 100% for completion
+          if (!hasError) {
+            progressData[jobId].analysis = 100;
+            progressData[jobId].processing = 100;
+            progressData[jobId].encoding = 100;
+            progressData[jobId].audio = 100;
+          }
         }
         
         // Write the progress file with the completion status
@@ -475,8 +489,13 @@ async function processVideo(inputPath, outputPath, analysis, jobId = null) {
     
     if (!phaseInfo) return 0;
     
-    // Calculate percentage for frame cropping phase
-    const phasePercentage = Math.floor(phaseProgress * 100);
+    // For completion case, ensure we report exactly 100%
+    let phasePercentage;
+    if (phaseProgress >= 0.999) {
+      phasePercentage = 100;
+    } else {
+      phasePercentage = Math.floor(phaseProgress * 100);
+    }
     
     // Create the status message for frame cropping
     const statusMessage = `${phaseInfo.description}: ${phasePercentage}%`;
@@ -889,7 +908,7 @@ async function addAudioToVideo(videoPath, audioSource, outputPath, jobId) {
         }
       })
       .on('end', () => {
-        // Mark audio merging as complete in progress.json
+        // Always set to 100% when audio merging is complete, regardless of last reported progress
         updateProgress(jobId, {
           audio: { 
             progress: 100,
