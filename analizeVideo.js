@@ -19,7 +19,6 @@ const DEFAULT_DETECTION_WIDTH = 0.3;
 const DEFAULT_DETECTION_HEIGHT = 0.7;
 const DEFAULT_EMPTY_KEYPOINTS_COUNT = 17;
 const DEFAULT_EMPTY_KEYPOINT_VALUE = [0.5, 0.5, 0.1];
-const PROGRESS_LOG_INTERVAL = 10;
 const CLUSTER_THRESHOLD = 0.05;
 
 // Initialize TensorFlow and load the MoveNet model
@@ -486,9 +485,10 @@ async function analyzeVideo(inputPath, outputPath) {
       eventEmitter.emit('frameProcessing', { frameNum: i, total: frameFiles.length });
       
       // Calculate and log progress percentage
-      const progressPercent = Math.floor((i / frameFiles.length) * 100);
-      if (i % PROGRESS_LOG_INTERVAL === 0 || i === frameFiles.length - 1) {
-        console.log(`Analyzing frame ${i+1}/${frameFiles.length} (${progressPercent}%)`);
+      if (i % Math.max(1, Math.floor(frameFiles.length / 100)) === 0 || 
+          i === frameFiles.length - 1) {
+        const progressPercent = Math.floor((i / frameFiles.length) * 100);
+        console.log(`Analyzing: ${progressPercent}%`);
       }
       
       // Prepare grayscale image for scene change detection
