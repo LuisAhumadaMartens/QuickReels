@@ -1,16 +1,19 @@
 {
   "name": "quickreels",
   "version": "1.0.0",
-  "description": "A Node.js library for processing media files",
+  "description": "A Mediastream libary for shortening videos into Reels format (9:16) while centering the content into important areas of the video using Tensorflow and MoveNet.",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "bin": {
+    "quickreels": "./bin/quickreels.js"
   },
-  "keywords": [
-    "video",
-    "media",
-    "processing"
-  ],
-  "author": "",
-  "license": "ISC"
+  "author": "Mediastream",
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@tensorflow/tfjs-node": "^4.10.0",
+    "@u4/opencv4nodejs": "^6.5.2",
+    "fluent-ffmpeg": "^2.1.2"
+  }
 }
