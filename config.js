@@ -1,8 +1,8 @@
-// Direct configuration values instead of reading from package.json
+// Direct configuration values from the original implementation
 const PORT = 3000;
 const DETECTION_THRESHOLD = 0.3;
 const PERSON_CLASS_ID = 0;
-const SCENE_CHANGE_THRESHOLD = 3000;
+const SCENE_CHANGE_THRESHOLD = 3000;  // Using the original threshold value
 const DEFAULT_CENTER = 0.5;
 const moveNetInputSize = 192;
 
@@ -26,7 +26,7 @@ const PROGRESS = {
     
     // Encoding is tracked separately in the UI
     
-    // TODO: These phases are deprecated and will be addressed later
+    // These phases are deprecated and will be addressed later
     PREPARATION: { weight: 0, description: "Preparing for processing", deprecated: true },
     AUDIO_MERGING: { weight: 0, description: "Adding audio", deprecated: true }
   }
