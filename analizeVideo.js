@@ -3,53 +3,32 @@ const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+ffmpeg.setFfmpegPath(ffmpegPath);
 const EventEmitter = require('events');
-
-// Import configuration from central config.js
 const config = require('./config');
 
-// Set the ffmpeg path
-ffmpeg.setFfmpegPath(ffmpegPath);
-
-// Create event emitter for frame processing events
 const eventEmitter = new EventEmitter();
-
-// Global model variable
 let model = null;
-
-// Constants for detection and processing
 const DETECTION_THRESHOLD = config.DETECTION_THRESHOLD;
 const PERSON_CLASS_ID = config.PERSON_CLASS_ID;
 const SCENE_CHANGE_THRESHOLD = config.SCENE_CHANGE_THRESHOLD;
 const DEFAULT_CENTER = config.DEFAULT_CENTER;
 const MOVE_NET_INPUT_SIZE = config.MOVE_NET_INPUT_SIZE;
 
-/**
- * Register event listener for frame processing
- * @param {string} event - Event name
- * @param {Function} callback - Callback function
- */
-function on(event, callback) {
-  eventEmitter.on(event, callback);
-}
-
-/**
- * Initialize TensorFlow and load the MoveNet model
- * @param {string} modelPath - Path to the model directory
- */
+// Initialize TensorFlow and load the MoveNet model
 async function initializeTensorFlow(modelPath) {
   try {
-    console.log(`Initializing TensorFlow with model at: ${modelPath}`);
-    // Check if model directory exists
+    console.log("Initializing TensorFlow");
+    console.log("┌──────────────────────[Tensorflow Log]──────────────────────┐");
+    
+    
     if (!fs.existsSync(modelPath)) {
       throw new Error(`Model directory not found: ${modelPath}`);
     }
     
-    // Look for model files
     const modelJsonPath = path.join(modelPath, 'model.json');
     const savedModelPath = path.join(modelPath, 'saved_model.pb');
     
-    // First try loading as GraphModel (model.json)
     if (fs.existsSync(modelJsonPath)) {
       try {
         console.log("Found model.json, loading as GraphModel");
@@ -58,32 +37,30 @@ async function initializeTensorFlow(modelPath) {
         return true;
       } catch (err) {
         console.log(`Error loading GraphModel: ${err.message}`);
-        // Continue to next method
       }
     }
     
     // Then try loading as SavedModel
     if (fs.existsSync(savedModelPath)) {
       try {
-        console.log("Found saved_model.pb, loading as SavedModel");
         model = await tf.node.loadSavedModel(modelPath);
+        console.log("└──────────────────────[Tensorflow Log]──────────────────────┘");
         console.log("Model loaded successfully");
         return true;
       } catch (err) {
         throw err;
       }
     }
-    
     throw new Error('No compatible model files found in the specified directory');
-  } catch (error) {
+  }
+  catch (error) {
     console.error(`Error initializing TensorFlow: ${error.message}`);
+    console.log("└──────────────────────[Tensorflow Log]──────────────────────┘");
     return false;
   }
 }
 
-/**
- * Prepare input tensor from image buffer for MoveNet model
- */
+// Prepare input tensor from image buffer for MoveNet model
 async function prepareInputTensor(frameBuffer) {
   try {
     // Decode image to tensor (3 channels for RGB)
@@ -107,27 +84,17 @@ async function prepareInputTensor(frameBuffer) {
   }
 }
 
-/**
- * Calculate Mean Squared Error between two tensors
- */
+// Calculate Mean Squared Error between two tensors
 function calculateMSE(tensorA, tensorB) {
   if (!tensorA || !tensorB) return 0;
-  
   return tf.tidy(() => {
-    // Calculate difference
     const diff = tf.sub(tensorA, tensorB);
-    
-    // Square the differences
     const squaredDiff = tf.square(diff);
-    
-    // Calculate mean (MSE)
     return squaredDiff.mean().arraySync();
   });
 }
 
-/**
- * Run inference on a frame tensor using MoveNet model
- */
+// Run inference on a frame tensor using MoveNet model
 async function runInference(tensor) {
   if (!model) {
     return [{ 
@@ -204,9 +171,7 @@ async function runInference(tensor) {
   }
 }
 
-/**
- * Cluster people detections
- */
+// Cluster people detections
 function clusterPeople(people, threshold = 0.05) {
   const clusters = [];
   
@@ -252,9 +217,7 @@ function clusterPeople(people, threshold = 0.05) {
   return mergedPeople;
 }
 
-/**
- * MovementPlanner class - handles camera movement planning
- */
+// Camera movement planning
 class MovementPlanner {
   constructor(fps) {
     this.frameData = [];
@@ -270,7 +233,7 @@ class MovementPlanner {
     this.fastTransitionThreshold = 0.1;
     this.inTransition = false;
     this.stableFrames = 0;
-    this.stableFramesRequired = Math.floor(fps * 0.5);  // Half a second worth of frames
+    this.stableFramesRequired = Math.floor(fps * 0.5); 
     this.isCentering = false;
   }
   
@@ -289,14 +252,14 @@ class MovementPlanner {
 
     if (this.waitingForDetection && cluster) {
       // Found first detection after scene change
-      const newX = cluster[1];  // Normalized x position from cluster
+      const newX = cluster[1];
       
       // Go back and update all frames since scene change
       for (let i = 0; i < this.frameData.length; i++) {
         const [fNum, _, isScene] = this.frameData[i];
         if (fNum >= this.currentSceneStart) {
           if (isScene) {
-            continue;  // Keep scene change marker
+            continue; 
           }
           this.frameData[i] = [fNum, newX, false];
         }
@@ -409,11 +372,8 @@ class MovementPlanner {
         if (Math.abs(delta) < deltaThreshold) {
           smoothedX = lastX;
         } else {
-          // Variable smoothing rate based on distance to target
           const distanceFactor = Math.min(Math.abs(delta) * 2, 1.0);
           let decelerationAlpha = baseAlpha * distanceFactor;
-          
-          // Even slower for final approach
           if (Math.abs(delta) < 0.1) {
             decelerationAlpha *= 0.5;
           }
@@ -430,14 +390,8 @@ class MovementPlanner {
   }
 }
 
-/**
- * Analyze video and extract camera tracking data
- * @param {string} inputPath - Path to input video
- * @param {string} outputPath - Path for output (not used in analysis)
- * @param {Object} options - Optional configuration
- * @returns {Object} - Analysis results
- */
-async function analizeVideo(inputPath, outputPath, options = {}) {
+// Main function to analyze video with tensorflow 
+async function analizeVideo(inputPath, outputPath) {
   try {
     console.log(`Analyzing video: ${inputPath}`);
     
@@ -458,7 +412,7 @@ async function analizeVideo(inputPath, outputPath, options = {}) {
     }
 
     // Initialize TensorFlow model
-    const modelPath = options.modelPath || path.join(process.cwd(), 'model');
+    const modelPath = path.join(process.cwd(), 'model');
     await initializeTensorFlow(modelPath);
     
     console.log("Extracting video metadata...");
@@ -548,7 +502,6 @@ async function analizeVideo(inputPath, outputPath, options = {}) {
         
         // Detect scene changes
         if (frameDiff > SCENE_CHANGE_THRESHOLD) {
-          console.log(`Scene change detected at frame ${i}`);
           sceneChanges.push(i);
         }
       }
@@ -586,14 +539,8 @@ async function analizeVideo(inputPath, outputPath, options = {}) {
       inputTensor.dispose();
     }
     
-    console.log("Frame analysis complete. Applying smoothing algorithm...");
-    
-    // Apply smoothing algorithm
     const smoothedPositions = planner.interpolateAndSmooth(frameFiles.length);
-    
     console.log("Analysis complete");
-    
-    // Clean up
     prevFrameGray?.dispose();
     
     // Emit analysis complete event
@@ -623,6 +570,5 @@ async function analizeVideo(inputPath, outputPath, options = {}) {
 module.exports = {
   analizeVideo,
   initializeTensorFlow,
-  MovementPlanner,
-  on
+  MovementPlanner
 }; 
