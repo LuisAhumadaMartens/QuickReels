@@ -14,6 +14,13 @@ const PERSON_CLASS_ID = config.PERSON_CLASS_ID;
 const SCENE_CHANGE_THRESHOLD = config.SCENE_CHANGE_THRESHOLD;
 const DEFAULT_CENTER = config.DEFAULT_CENTER;
 const MOVE_NET_INPUT_SIZE = config.MOVE_NET_INPUT_SIZE;
+// Add new constants for previously hardcoded values
+const DEFAULT_DETECTION_WIDTH = 0.3;
+const DEFAULT_DETECTION_HEIGHT = 0.7;
+const DEFAULT_EMPTY_KEYPOINTS_COUNT = 17;
+const DEFAULT_EMPTY_KEYPOINT_VALUE = [0.5, 0.5, 0.1];
+const PROGRESS_LOG_INTERVAL = 10;
+const CLUSTER_THRESHOLD = 0.05;
 
 // Initialize TensorFlow and load the MoveNet model
 async function initializeTensorFlow(modelPath) {
@@ -100,11 +107,11 @@ async function runInference(tensor) {
     return [{ 
       x: 0.5,
       y: 0.5,
-      width: 0.2,
-      height: 0.5,
+      width: DEFAULT_DETECTION_WIDTH,
+      height: DEFAULT_DETECTION_HEIGHT,
       confidence: 0.9,
       class: PERSON_CLASS_ID,
-      keypoints: Array(17).fill().map(() => [0.5, 0.5, 0.1]) // Create empty keypoints
+      keypoints: Array(DEFAULT_EMPTY_KEYPOINTS_COUNT).fill().map(() => DEFAULT_EMPTY_KEYPOINT_VALUE)
     }];
   }
 
@@ -153,8 +160,8 @@ async function runInference(tensor) {
         const detection = {
           x: avgX,
           y: avgY,
-          width: 0.3,
-          height: 0.7,
+          width: DEFAULT_DETECTION_WIDTH,
+          height: DEFAULT_DETECTION_HEIGHT,
           confidence: avgConfidence,
           class: PERSON_CLASS_ID,
           keypoints: validKeypoints
@@ -172,11 +179,11 @@ async function runInference(tensor) {
 }
 
 // Cluster people detections
-function clusterPeople(people, threshold = 0.05) {
+function clusterPeople(people, threshold = CLUSTER_THRESHOLD) {
   const clusters = [];
   
   for (const person of people) {
-    const [personId, keypoints] = person;
+    const keypoints = person[1];
     const [y, x, confidence] = keypoints[0]; // Use first keypoint
     
     let added = false;
@@ -225,13 +232,11 @@ class MovementPlanner {
     this.currentSceneStart = 0;
     this.waitingForDetection = false;
     this.defaultX = DEFAULT_CENTER;
-    this.smoothingRate = 0.05;
     this.maxMovementPerFrame = 0.03;
     this.positionHistory = [];
     this.historySize = 3;
     this.centeringWeight = 0.4;
     this.fastTransitionThreshold = 0.1;
-    this.inTransition = false;
     this.stableFrames = 0;
     this.stableFramesRequired = Math.floor(fps * 0.5); 
     this.isCentering = false;
@@ -240,7 +245,6 @@ class MovementPlanner {
   planMovement(frameNum, cluster, frameDiff, sceneChangeThreshold) {
     if (frameDiff > sceneChangeThreshold) {
       this.positionHistory = [];
-      this.inTransition = false;
       this.stableFrames = 0;
       this.isCentering = false;
       // Reset history on scene change
@@ -391,21 +395,17 @@ class MovementPlanner {
 }
 
 // Main function to analyze video with tensorflow 
-async function analizeVideo(inputPath, outputPath) {
+async function analyzeVideo(inputPath, outputPath) {
   try {
     console.log(`Analyzing video: ${inputPath}`);
     
     // Create temp directory for frames
     const processingId = path.basename(outputPath, path.extname(outputPath));
     const tempDir = path.join(process.cwd(), 'temp', processingId);
-    const framesDir = path.join(tempDir, 'frames');
-    const analysisFramesDir = path.join(framesDir, 'analysis');
+    const analysisFramesDir = path.join(tempDir, 'frames', 'analysis');
     
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
-    }
-    if (!fs.existsSync(framesDir)) {
-      fs.mkdirSync(framesDir, { recursive: true });
     }
     if (!fs.existsSync(analysisFramesDir)) {
       fs.mkdirSync(analysisFramesDir, { recursive: true });
@@ -487,7 +487,7 @@ async function analizeVideo(inputPath, outputPath) {
       
       // Calculate and log progress percentage
       const progressPercent = Math.floor((i / frameFiles.length) * 100);
-      if (i % 10 === 0 || i === frameFiles.length - 1) {
+      if (i % PROGRESS_LOG_INTERVAL === 0 || i === frameFiles.length - 1) {
         console.log(`Analyzing frame ${i+1}/${frameFiles.length} (${progressPercent}%)`);
       }
       
@@ -568,7 +568,7 @@ async function analizeVideo(inputPath, outputPath) {
 }
 
 module.exports = {
-  analizeVideo,
+  analyzeVideo,
   initializeTensorFlow,
   MovementPlanner
 }; 
