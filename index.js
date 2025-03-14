@@ -1,17 +1,15 @@
 const fs = require('fs');
 const path = require('path');
-const { analizeVideo } = require('./analizeVideo');
+const { analyzeVideo } = require('./analizeVideo');
 const { processVideo } = require('./processVideo');
-const { VideoSegment, VideoProcessor } = require('./videoProcessor');
 
 /**
  * QuickReels - Analyze and process videos to create vertical video crops
  * @param {string} inputPath - Path to input video file
  * @param {string} outputPath - Path to save the output video
- * @param {Object} options - Optional configuration
  * @returns {Promise<Object>} - Processing result
  */
-async function quickReels(inputPath, outputPath, options = {}) {
+async function quickReels(inputPath, outputPath) {
   // Validate input path
   if (!inputPath || !fs.existsSync(inputPath)) {
     throw new Error(`Input file does not exist: ${inputPath}`);
@@ -28,45 +26,21 @@ async function quickReels(inputPath, outputPath, options = {}) {
   }
 
   try {
-    console.log(`QuickReels: Processing ${inputPath} to ${outputPath}`);
-    console.log('Step 1: Analyzing video...');
-    
-    // Step 1: Analyze the video to get camera tracking data
-    const analysis = await analizeVideo(inputPath, outputPath, options);
-    
+    console.log(`QuickReels: Processing ${inputPath}`);
+
+    console.log('Analyzing video using MoveNet...');
+    const analysis = await analyzeVideo(inputPath, outputPath);
     console.log('Analysis complete.');
-    console.log('Step 2: Processing video...');
-    
-    // Step 2: Process the video based on analysis results
+
+    console.log('Processing video by cropping frames...');
     const processResult = await processVideo(inputPath, outputPath, analysis);
-    
-    // Step 3: If custom segments are specified, process them using VideoProcessor
-    if (options.segments && Array.isArray(options.segments) && options.segments.length > 0) {
-      console.log('Step 3: Processing custom segments...');
-      
-      // Convert segment options to VideoSegment objects
-      const videoSegments = options.segments.map(segmentOpt => {
-        return new VideoSegment(
-          segmentOpt.outputPath,
-          segmentOpt.startFrame || null,
-          segmentOpt.endFrame || null
-        );
-      });
-      
-      // Create video processor instance
-      const processor = new VideoProcessor(inputPath, videoSegments);
-      
-      // Process all segments using the same analysis data
-      const segmentResults = await processor.processAll(null, analysis);
-      
-      // Add segment results to the main result
-      processResult.segments = segmentResults;
-    }
-    
     console.log('Processing complete.');
+
+    console.log(`The output file was saved in ${outputPath}`);
     return processResult;
+    
   } catch (error) {
-    console.error(`Error in QuickReels: ${error.message}`);
+    console.error(`Error: ${error.message}`);
     throw error;
   }
 }
